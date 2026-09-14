@@ -55,6 +55,14 @@ python predict.py --input nnUNet_raw/Dataset150_PancreasDuct/imagesTs \
 
 # 4) 评估（逐类 Dice/Recall/HD95(mm)/ASSD(mm)/clDice）
 python evaluate.py --pred_dir predictions --gt_dir nnUNet_raw/Dataset150_PancreasDuct/labelsTs
+
+# 5) Exp 1–6 正式对比（每个实验一个预测目录，输出一张对比表）
+python compare_experiments.py \
+    --gt_dir nnUNet_raw/Dataset150_PancreasDuct/labelsTs \
+    --pred_dirs exp1=predictions/exp1 exp2_resencM=predictions/exp2_m \
+        exp2_resencL=predictions/exp2_l exp4=predictions/exp4 \
+        exp5=predictions/exp5 exp6_unetr=predictions/exp6_unetr \
+        exp6_swinunetr=predictions/exp6_swinunetr exp6_mednext=predictions/exp6_mednext
 ```
 
 ## 目录结构
@@ -64,14 +72,15 @@ python evaluate.py --pred_dir predictions --gt_dir nnUNet_raw/Dataset150_Pancrea
 ├── nnunet_utils/            # 官方包的薄封装（不改 nnU-Net 内部）
 │   ├── config.py            # nnUNet_raw/preprocessed/results 路径 + 两个数据集/标签常量
 │   ├── plans_patch.py       # 关闭深监督（官方读回字段）
-│   └── metrics.py           # Dice / Recall / HD95 / ASSD / clDice / bbox IoU（评估用）
+│   ├── metrics.py           # Dice / Recall / HD95 / ASSD / clDice / bbox IoU（评估用）
+│   └── evaluation.py        # 目录级评估（evaluate.py / compare_experiments.py 共用）
 ├── custom_trainers/         # 官方扩展点：自定义 nnUNetTrainer 子类
 │   ├── nnUNetTrainer_DiceCEclDice.py
 │   ├── nnUNetTrainer_UNETR.py / nnUNetTrainer_SwinUNETR.py / nnUNetTrainer_MedNeXt.py
 ├── experiments/             # 每个实验的编排脚本（调用官方 CLI）
 ├── install_custom_trainers.py
 ├── generate_synthetic_data.py
-├── predict.py / evaluate.py / run_experiment.py
+├── predict.py / evaluate.py / compare_experiments.py / run_experiment.py
 └── requirements.txt
 ```
 
@@ -145,9 +154,14 @@ UNETR / SwinUNETR / MedNeXt 没有深监督头。Exp 6 用独立 plans
 上训练 `3d_fullres`，在 ROI 内分割 duct。`predict.py --coarse_to_fine` 串起两阶段：
 粗预测 ROI → 裁剪（含 margin）→ 细分割 duct → 贴回全图。
 
-### 评估指标（evaluate.py）
-逐类计算 Dice / Recall / HD95 / ASSD / clDice；HD95 与 ASSD 用 GT 的体素 spacing
-换算成**毫米**。另提供 `--localization`（bbox IoU）用于粗定位阶段的快速检查。
+### 评估指标（evaluate.py / compare_experiments.py）
+`nnunet_utils/evaluation.py` 提供目录级评估，逐类计算 Dice / Recall / HD95 / ASSD / clDice；
+HD95 与 ASSD 用 GT 的体素 spacing 换算成**毫米**。
+
+* `evaluate.py` 评估**单个**预测目录，逐 case、逐类打印，并给出逐类均值；`--localization`
+  用 bbox IoU 快速检查粗定位阶段。
+* `compare_experiments.py` 做 **Exp 1–6 正式对比**：传入 `name=path` 的 `--pred_dirs`，
+  输出一张「实验 ×（逐类指标 + 双类均值）」对比表。
 
 ## 说明
 
