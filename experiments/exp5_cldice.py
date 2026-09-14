@@ -1,34 +1,13 @@
-"""Experiment 5 — continuity loss.
+"""Exp 5 — continuity: Dice+CE (baseline) vs Dice+CE+clDice."""
 
-    Dice + CE  vs  Dice + CE + clDice.
-
-clDice rewards topological continuity of thin / tubular structures by computing
-the Dice between soft skeletons. This experiment trains identical models with
-and without the clDice term and compares clDice (and Dice) on the validation set.
-"""
-
-from nnunet.config import NNUnetConfig
-from .common import run_training
-
-LOSSES = ("dice_ce", "dice_ce_cldice")
+from .common import ensure_custom_trainers_installed, plan_and_preprocess, set_num_epochs, train
 
 
-def build_config(loss: str, **overrides) -> NNUnetConfig:
-    cfg = NNUnetConfig()
-    cfg.backbone = "plain"
-    cfg.num_classes = 2
-    cfg.loss = loss
-    cfg.num_epochs = 1000
-    for k, v in overrides.items():
-        setattr(cfg, k, v)
-    return cfg
+def run(device=None, epochs=None):
+    plan_and_preprocess()
+    if epochs:
+        set_num_epochs(epochs)
+    ensure_custom_trainers_installed()
 
-
-def run(data_dir: str = "data", output_dir: str = "runs/exp5_cldice",
-        device: str = "cuda", losses=LOSSES, **overrides):
-    results = {}
-    for loss in losses:
-        cfg = build_config(loss, **overrides)
-        out = f"{output_dir}/{loss}"
-        results[loss] = run_training(cfg, data_dir, out, device=device)
-    return results
+    train("nnUNetTrainer", device=device)               # Dice + CE
+    train("nnUNetTrainer_DiceCEclDice", device=device)   # Dice + CE + clDice

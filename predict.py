@@ -1,165 +1,134 @@
 #!/usr/bin/env python3
-"""Inference entry point.
+"""Run inference through the official nnU-Net v2 predictor.
 
-Supports single-stage inference and coarse-to-fine (Experiment 4) via
-``--coarse_checkpoint``:
+Normal:
+    python predict.py --input nnUNet_raw/Dataset150_PancreasCT/imagesTs \
+        --output predictions --trainer nnUNetTrainer
 
-    python predict.py --input data/imagesTs --output preds \
-        --checkpoint runs/exp1_baseline/checkpoint_best.pth
-
-    python predict.py --input data/imagesTs --output preds \
-        --checkpoint runs/exp4_fine/checkpoint_best.pth \
-        --coarse_checkpoint runs/exp4_coarse/checkpoint_best.pth
+Coarse-to-fine (Exp 4):
+    python predict.py --input nnUNet_raw/Dataset150_PancreasCT/imagesTs \
+        --output predictions_c2f --coarse_to_fine --margin 20
 """
 
 import argparse
-import os
+import subprocess
 from pathlib import Path
 
-import numpy as np
-import torch
-from scipy.ndimage import zoom
-
-from nnunet.config import NNUnetConfig
-from nnunet.network import build_network
-from nnunet.inference.predictor import (
-    SlidingWindowPredictor,
-    connected_component_postprocessing,
+from nnunet_utils.config import (
+    DATASET_ID, DATASET_NAME, DEFAULT_PLANS, RESULTS_DIR, setup_paths,
 )
-from nnunet.inference.coarse_to_fine import CoarseToFinePredictor
-from nnunet.utils.nifti_io import load_nifti_with_spacing, save_segmentation_nifti
-from nnunet.dataset.preprocessing import ct_intensity_normalization, resample_volume
+
+setup_paths()
 
 
-def load_model(checkpoint_path: str, device: str):
-    """Load a model (and its config) from a checkpoint."""
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = checkpoint.get("config", NNUnetConfig())
-    model = build_network(config)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.to(device)
-    model.eval()
-    print(f"  Loaded checkpoint (epoch {checkpoint.get('epoch', '?')}, backbone {config.backbone})")
-    return model, config
+def _run(cmd):
+    cmd = [str(c) for c in cmd]
+    print("\n$ " + " ".join(cmd))
+    subprocess.check_call(cmd)
 
 
-def predict_single(
-    input_path: str,
-    output_dir: str,
-    model,
-    config: NNUnetConfig,
-    device: str = "cuda",
-    postprocess: bool = True,
-    coarse_model=None,
-):
-    """Run inference on a single NIfTI file (optionally coarse-to-fine)."""
-    print(f"\nProcessing: {input_path}")
+def model_folder(trainer_name, configuration, plans_identifier=DEFAULT_PLANS):
+    from batchgenerators.utilities.file_and_folder_operations import join
+    return join(RESULTS_DIR, DATASET_NAME, f"{trainer_name}__{plans_identifier}__{configuration}")
 
-    image, affine, spacing = load_nifti_with_spacing(input_path)
-    original_shape = image.shape
-    print(f"  Original shape: {original_shape} | spacing: {spacing}")
 
-    image = ct_intensity_normalization(image)
+def predict_normal(args):
+    _run(["nnUNetv2_predict",
+          "-i", args.input, "-o", args.output,
+          "-d", str(DATASET_ID), "-c", args.config, "-tr", args.trainer,
+          "-p", args.plans, "-f", str(args.fold), "-chk", args.checkpoint])
 
-    # Match the training preprocessing: resample to target spacing if requested.
-    if config.target_spacing is not None:
-        image = resample_volume(image, spacing, config.target_spacing,
-                                is_label=False, order=config.resample_order_image)
 
-    # ---- Predict ----
-    if coarse_model is not None:
-        coarse, _ = coarse_model
-        predictor = CoarseToFinePredictor(
-            coarse_model=coarse,
-            fine_model=model,
-            coarse_patch_size=config.patch_size,
-            fine_patch_size=config.patch_size,
-            num_classes=config.num_classes,
-            roi_margin=config.roi_margin,
-            overlap=config.sliding_window_overlap,
-            batch_size=config.sliding_window_batch_size,
-            device=device,
-            gaussian_sigma=config.gaussian_weight_sigma,
-        )
-    else:
-        predictor = SlidingWindowPredictor(
-            model=model,
-            patch_size=config.patch_size,
-            num_classes=config.num_classes,
-            overlap=config.sliding_window_overlap,
-            batch_size=config.sliding_window_batch_size,
-            device=device,
-            gaussian_sigma=config.gaussian_weight_sigma,
-        )
+def predict_coarse_to_fine(args):
+    import nibabel as nib
+    import numpy as np
+    from batchgenerators.utilities.file_and_folder_operations import (
+        isfile, join, maybe_mkdir_p, subfiles,
+    )
+    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
-    segmentation = predictor.predict(image)
+    maybe_mkdir_p(args.output)
+    input_files = sorted(subfiles(args.input, suffix=".nii.gz", join=True))
+    coarse_tmp = join(args.output, "_coarse")
+    crop_tmp = join(args.output, "_crops")
+    maybe_mkdir_p(coarse_tmp)
+    maybe_mkdir_p(crop_tmp)
 
-    # Resample the segmentation back to the original spacing/shape.
-    if config.target_spacing is not None and segmentation.shape != original_shape:
-        back_zoom = tuple(o / s for o, s in zip(original_shape, segmentation.shape))
-        segmentation = zoom(segmentation.astype(np.float32), back_zoom, order=0, prefilter=False)
-        segmentation = np.round(segmentation).astype(np.uint8)
+    # 1) coarse stage (3d_lowres) — localize the pancreas
+    coarse = nnUNetPredictor(verbose=False, verbose_preprocessing=False, allow_tqdm=True)
+    coarse.initialize_from_trained_model_folder(
+        model_folder("nnUNetTrainer", args.coarse_config),
+        use_folds=(args.fold,), checkpoint_name=args.checkpoint)
+    coarse.predict_from_files(input_files, coarse_tmp, save_probabilities=False, overwrite=True)
 
-    if postprocess:
-        print("  Applying connected-component post-processing...")
-        segmentation = connected_component_postprocessing(
-            segmentation, min_volume_mm3=50.0, spacing=spacing,
-        )
+    # 2) fine stage (3d_fullres) — segment each ROI crop
+    fine = nnUNetPredictor(verbose=False, verbose_preprocessing=False, allow_tqdm=True)
+    fine.initialize_from_trained_model_folder(
+        model_folder("nnUNetTrainer", args.config),
+        use_folds=(args.fold,), checkpoint_name=args.checkpoint)
 
-    # ---- Save ----
-    case_name = Path(input_path).stem.replace("_0000", "")
-    output_path = Path(output_dir) / f"{case_name}_seg.nii.gz"
-    save_segmentation_nifti(segmentation, affine, str(output_path))
-    print(f"  Saved: {output_path}")
+    for in_file in input_files:
+        case_id = Path(in_file).name.replace("_0000.nii.gz", "")
+        img = nib.load(in_file)
+        img_data = img.get_fdata().astype(np.float32)
 
-    fg_voxels = int((segmentation > 0).sum())
-    print(f"  Foreground voxels: {fg_voxels}")
-    return segmentation
+        coarse_mask_path = join(coarse_tmp, f"{case_id}.nii.gz")
+        cm = nib.load(coarse_mask_path).get_fdata()
+
+        z, y, x = np.nonzero(cm > 0)
+        if len(z) == 0:
+            empty = nib.Nifti1Image(np.zeros_like(cm, dtype=np.uint8), img.affine)
+            nib.save(empty, join(args.output, f"{case_id}.nii.gz"))
+            continue
+
+        m = args.margin
+        z0, z1 = max(0, int(z.min()) - m), min(cm.shape[0], int(z.max()) + m + 1)
+        y0, y1 = max(0, int(y.min()) - m), min(cm.shape[1], int(y.max()) + m + 1)
+        x0, x1 = max(0, int(x.min()) - m), min(cm.shape[2], int(x.max()) + m + 1)
+
+        crop = img_data[z0:z1, y0:y1, x0:x1]
+        # keep spacing, shift the origin so the crop's voxel (0,0,0) maps back to
+        # the original voxel (z0, y0, x0)
+        crop_affine = img.affine.copy()
+        crop_affine[:3, 3] = img.affine[:3, 3] + img.affine[:3, :3] @ np.array([z0, y0, x0])
+        crop_file = join(crop_tmp, f"{case_id}_0000.nii.gz")
+        nib.save(nib.Nifti1Image(crop, crop_affine), crop_file)
+
+        fine_out = join(crop_tmp, f"{case_id}_out")
+        maybe_mkdir_p(fine_out)
+        fine.predict_from_files([crop_file], fine_out, save_probabilities=False, overwrite=True)
+        fm_path = join(fine_out, f"{case_id}.nii.gz")
+        if not isfile(fm_path):
+            fm_path = join(fine_out, f"{case_id}_0000.nii.gz")
+        fm = nib.load(fm_path).get_fdata()
+
+        full = np.zeros_like(cm, dtype=fm.dtype)
+        full[z0:z1, y0:y1, x0:x1] = fm
+        nib.save(nib.Nifti1Image(full, img.affine), join(args.output, f"{case_id}.nii.gz"))
+
+    print(f"\nCoarse-to-fine predictions saved to {args.output}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="nnU-Net 3D pancreas segmentation inference")
-    parser.add_argument("--input", type=str, required=True, help="Input NIfTI file or directory")
-    parser.add_argument("--output", type=str, default="predictions")
-    parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--coarse_checkpoint", type=str, default=None,
-                        help="Coarse model for coarse-to-fine inference (Exp4)")
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--no_postprocess", action="store_true")
-    parser.add_argument("--overlap", type=float, default=0.5)
-    parser.add_argument("--batch_size", type=int, default=4)
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="nnU-Net v2 inference")
+    ap.add_argument("--input", required=True, help="folder of .nii.gz images")
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--trainer", default="nnUNetTrainer")
+    ap.add_argument("--config", default="3d_fullres")
+    ap.add_argument("--plans", default=DEFAULT_PLANS)
+    ap.add_argument("--fold", type=int, default=0)
+    ap.add_argument("--checkpoint", default="checkpoint_final.pth")
+    ap.add_argument("--coarse_to_fine", action="store_true",
+                    help="two-stage coarse-to-fine inference (Exp 4)")
+    ap.add_argument("--coarse_config", default="3d_lowres",
+                    help="configuration used for the coarse/localization stage")
+    ap.add_argument("--margin", type=int, default=20, help="ROI margin in voxels")
+    args = ap.parse_args()
 
-    print("=" * 64)
-    print("nnU-Net 3D Pancreas Segmentation — Inference")
-    print("=" * 64)
-
-    model, config = load_model(args.checkpoint, args.device)
-    config.sliding_window_overlap = args.overlap
-    config.sliding_window_batch_size = args.batch_size
-
-    coarse = None
-    if args.coarse_checkpoint:
-        coarse_model, coarse_config = load_model(args.coarse_checkpoint, args.device)
-        coarse = (coarse_model, coarse_config)
-
-    os.makedirs(args.output, exist_ok=True)
-
-    input_path = Path(args.input)
-    if input_path.is_dir():
-        nifti_files = sorted(input_path.glob("*.nii.gz"))
-        if not nifti_files:
-            print(f"No .nii.gz files found in {input_path}")
-            return
-        print(f"Found {len(nifti_files)} NIfTI files.")
-        for nii_file in nifti_files:
-            predict_single(str(nii_file), args.output, model, config,
-                           args.device, not args.no_postprocess, coarse)
+    if args.coarse_to_fine:
+        predict_coarse_to_fine(args)
     else:
-        predict_single(str(input_path), args.output, model, config,
-                       args.device, not args.no_postprocess, coarse)
-
-    print(f"\nAll predictions saved to: {args.output}")
+        predict_normal(args)
 
 
 if __name__ == "__main__":

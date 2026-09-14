@@ -1,4 +1,4 @@
-"""Experiment scripts, one module per step of the technical roadmap."""
+"""One module per step of the technical roadmap (all built on official nnU-Net v2)."""
 
 from . import (
     exp1_baseline,

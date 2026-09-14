@@ -1,69 +1,60 @@
-"""Shared helpers for the experiment scripts."""
+"""Shared helpers that drive the official nnU-Net v2 command-line tools.
 
-import numpy as np
+Nothing here reimplements nnU-Net: planning / preprocessing / training /
+prediction are all delegated to the installed ``nnUNetv2_*`` entry points. These
+helpers only assemble the right command lines and, for the custom trainers,
+copy them into the nnunetv2 package once.
+"""
 
-from nnunet.config import NNUnetConfig
-from nnunet.network import build_network
-from nnunet.training.trainer import Trainer
-from nnunet.dataset.data_loading import load_dataset
+import subprocess
+
+from nnunet_utils.config import DATASET_ID, DEFAULT_PLANS, setup_paths
+from nnunet_utils.plans_patch import set_num_epochs, patch_arch_init_kwargs  # noqa: F401  (re-exported)
+
+# Point nnU-Net at the local folders before any nnunetv2 import.
+setup_paths()
 
 
-def run_training(
-    config: NNUnetConfig,
-    data_dir: str,
-    output_dir: str,
-    device: str = "cuda",
-    val_split: float = 0.0,
-    pancreas_only: bool = False,
-    modality: str = "ct",
-    resume: str = None,
-) -> Trainer:
-    """Load data, build the network and train. Returns the fitted trainer."""
-    print("=" * 64)
-    print(f"Experiment run -> {output_dir}")
-    print("=" * 64)
-    print(f"  Backbone: {config.backbone} | Loss: {config.loss}")
-    print(f"  Target spacing: {config.target_spacing} | ROI: {config.use_roi}")
+def run(cmd):
+    cmd = [str(c) for c in cmd]
+    print("\n$ " + " ".join(cmd))
+    subprocess.check_call(cmd)
 
-    train_images, train_masks, _ = load_dataset(
-        data_dir, config, mode="train",
-        pancreas_only=pancreas_only, modality=modality,
-    )
 
-    if val_split > 0:
-        rng = np.random.RandomState(42)
-        indices = rng.permutation(len(train_images))
-        val_size = max(1, int(len(train_images) * val_split))
-        val_idx, train_idx = indices[:val_size], indices[val_size:]
-        val_images = [train_images[i] for i in val_idx]
-        val_masks = [train_masks[i] for i in val_idx]
-        train_images = [train_images[i] for i in train_idx]
-        train_masks = [train_masks[i] for i in train_idx]
-    else:
-        val_images, val_masks, _ = load_dataset(
-            data_dir, config, mode="validation",
-            pancreas_only=pancreas_only, modality=modality,
-        )
+def plan_and_preprocess(dataset_id=DATASET_ID, configurations=("3d_fullres",),
+                        plans_identifier=DEFAULT_PLANS, target_spacing=None):
+    """Run the official planning + preprocessing (``nnUNetv2_plan_and_preprocess``)."""
+    cmd = ["nnUNetv2_plan_and_preprocess", "-d", str(dataset_id),
+           "-c"] + list(configurations) + [
+           "--verify_dataset_integrity",
+           "--overwrite_plans_name", plans_identifier]
+    if target_spacing is not None:
+        cmd += ["--overwrite_target_spacing"] + [str(s) for s in target_spacing]
+    run(cmd)
 
-    print(f"Train: {len(train_images)} | Val: {len(val_images)}")
 
-    model = build_network(config)
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {num_params:,}")
+def train(trainer_name, dataset_id=DATASET_ID, configuration="3d_fullres", fold=0,
+          plans_identifier=DEFAULT_PLANS, device=None):
+    """Train one model with the official ``nnUNetv2_train`` entry point."""
+    cmd = ["nnUNetv2_train", str(dataset_id), configuration, str(fold),
+           "-tr", trainer_name, "-p", plans_identifier]
+    if device and device != "cuda":  # nnU-Net auto-detects CUDA by default
+        cmd += ["-device", device]
+    run(cmd)
 
-    trainer = Trainer(
-        model=model,
-        config=config,
-        train_volumes=train_images,
-        train_masks=train_masks,
-        val_volumes=val_images,
-        val_masks=val_masks,
-        output_dir=output_dir,
-        device=device,
-    )
-    if resume:
-        trainer.load_checkpoint(resume)
 
-    trainer.train()
-    print(f"Best val Dice ({output_dir}): {trainer.best_val_dice:.4f}")
-    return trainer
+def predict(input_folder, output_folder, dataset_id=DATASET_ID,
+            configuration="3d_fullres", trainer_name="nnUNetTrainer",
+            plans_identifier=DEFAULT_PLANS, folds="0",
+            checkpoint="checkpoint_final.pth"):
+    """Run the official ``nnUNetv2_predict`` entry point."""
+    cmd = ["nnUNetv2_predict", "-i", str(input_folder), "-o", str(output_folder),
+           "-d", str(dataset_id), "-c", configuration, "-tr", trainer_name,
+           "-p", plans_identifier, "-f", str(folds), "-chk", checkpoint]
+    run(cmd)
+
+
+def ensure_custom_trainers_installed():
+    """Copy the custom trainers into the nnunetv2 package (idempotent)."""
+    from install_custom_trainers import install
+    install()

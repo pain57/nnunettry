@@ -1,113 +1,104 @@
-# nnU-Net 3D Pancreas Segmentation — Experiment Framework
+# nnU-Net v2 胰腺分割 — 六步技术路线实验框架
 
-A self-contained PyTorch implementation of nnU-Net for 3D pancreas segmentation
-in CT, reorganized around a six-step technical roadmap. Each step maps to one
-experiment module and to one knob in [`nnunet/config.py`](nnunet/config.py).
+基于**官方 nnU-Net v2 包**（`nnunetv2`）的胰腺 CT 分割实验框架。训练/规划/预处理/推理全部调用
+官方 `nnUNetv2_*` 入口，只在官方扩展点上做少量自定义（clDice 损失、UNETR/SwinUNETR/MedNeXt 网络），
+**不再自建 nnU-Net 克隆**。
 
-## Technical roadmap
+## 技术路线 → 实验映射
 
-| # | Experiment | What it changes | Where |
-|---|------------|-----------------|-------|
-| 1 | **Baseline** — nnU-Net v2, 3D fullres, PlainConvUNet | default backbone + Dice/CE | [exp1_baseline.py](experiments/exp1_baseline.py) |
-| 2 | **Backbone** — ResEnc M / L | residual-encoder U-Net (M/L sizes) | [exp2_backbone.py](experiments/exp2_backbone.py) |
-| 3 | **Target spacing** | resample to isotropic / anisotropic spacing | [exp3_spacing.py](experiments/exp3_spacing.py) |
-| 4 | **ROI / coarse-to-fine** | two-stage localization + ROI sampling | [exp4_roi.py](experiments/exp4_roi.py) |
-| 5 | **Continuity** — Dice+CE vs +clDice | add differentiable clDice term | [exp5_cldice.py](experiments/exp5_cldice.py) |
-| 6 | **Other models** — UNETR / SwinUNETR / MedNeXt | alternative backbones | [exp6_models.py](experiments/exp6_models.py) |
+| # | 实验 | 做法（官方机制） | 入口 |
+|---|------|------------------|------|
+| 1 | **基线** nnU-Net v2 3D fullres PlainConvUNet | 默认 `nnUNetTrainer`（Dice+CE） | [exp1_baseline.py](experiments/exp1_baseline.py) |
+| 2 | **骨干对比** ResEnc M/L | 官方 `nnUNetTrainerResEncM` / `nnUNetTrainerResEncL` | [exp2_backbone.py](experiments/exp2_backbone.py) |
+| 3 | **目标间距** 研究微细管道 | `--overwrite_target_spacing` 生成第二套 plans | [exp3_spacing.py](experiments/exp3_spacing.py) |
+| 4 | **ROI / coarse-to-fine** 类别不平衡 | `3d_lowres` 定位 + `3d_fullres` 精分割 | [exp4_roi.py](experiments/exp4_roi.py) |
+| 5 | **连续性** Dice+CE vs +clDice | 自定义 `nnUNetTrainer_DiceCEclDice` | [exp5_cldice.py](experiments/exp5_cldice.py) |
+| 6 | **其他模型** UNETR / SwinUNETR / MedNeXt | 自定义 trainer（MONAI / MedNeXt） | [exp6_models.py](experiments/exp6_models.py) |
 
-## Installation
+## 安装
 
 ```bash
 pip install -r requirements.txt
+
+# MedNeXt（Exp 6 可选，PyPI 上没有）
+pip install git+https://github.com/MIC-DKFZ/MedNeXt.git
 ```
 
-## Quick start
+## 快速开始
 
 ```bash
-# 1. Generate synthetic data (optionally add a thin duct for Exp 3/5)
+# 1) 生成合成数据（直接写入 nnU-Net raw 格式；--add_duct 生成细导管用于 Exp 3/5）
 python generate_synthetic_data.py --num_train 20 --num_test 4 --add_duct
 
-# 2. Run an experiment (unified entry point)
-python run_experiment.py --exp 1 --data_dir data --device cuda
-python run_experiment.py --exp 6 --data_dir data --device cuda --epochs 200
+# 2) 运行某个实验（会依次完成 plan + preprocess + train）
+python run_experiment.py --exp 1
+python run_experiment.py --exp 6 --device cuda --epochs 500
 
-# or train / predict directly
-python train.py --data_dir data --output_dir runs/exp1 --backbone plain --epochs 1000
-python predict.py --input data/imagesTs --output predictions \
-    --checkpoint runs/exp1/checkpoint_best.pth
+# 3) 推理
+python predict.py --input nnUNet_raw/Dataset150_PancreasCT/imagesTs --output predictions
+python predict.py --input nnUNet_raw/Dataset150_PancreasCT/imagesTs \
+    --output predictions_c2f --coarse_to_fine        # Exp 4 两阶段
 
-# 3. Evaluate
-python evaluate.py --pred_dir predictions --gt_dir data/labelsTs
+# 4) 评估（Dice / HD95 / clDice）
+python evaluate.py --pred_dir predictions --gt_dir nnUNet_raw/Dataset150_PancreasCT/labelsTs
 ```
 
-## Experiment notes
-
-- **Exp 1** — plain baseline at native spacing; the reference every other
-  experiment is compared against.
-- **Exp 2** — `resenc_m` vs `resenc_l` differ only in encoder channel depth and
-  block count (see `nnunet/network/resenc.py`).
-- **Exp 3** — `--target_spacing` resamples volumes before cropping. Finer
-  isotropic spacing preserves thin structures at higher memory cost.
-- **Exp 4** — a coarse model localizes the pancreas, a fine model (trained with
-  `--use_roi`, sampling patches inside the ground-truth ROI) segments the crop.
-  Combine them at inference with `predict.py --coarse_checkpoint ...`.
-- **Exp 5** — `--loss dice_ce_cldice` adds a differentiable clDice term that
-  rewards topological continuity of thin / tubular structures.
-- **Exp 6** — transformer backbones (`unetr`, `swin_unetr`) and ConvNeXt
-  (`mednext_s`, `mednext_m`). UNETR defaults are reduced to stay tractable on a
-  single GPU.
-
-## Project structure
+## 目录结构
 
 ```
 胰腺分割/
-├── nnunet/
-│   ├── config.py                  # single dataclass driving all experiments
-│   ├── network/
-│   │   ├── unet3d.py              # PlainConvUNet (baseline)
-│   │   ├── resenc.py              # ResEncUNet M/L (residual encoder)
-│   │   ├── unetr.py               # UNETR (ViT encoder)
-│   │   ├── swin_unetr.py          # SwinUNETR (Swin Transformer encoder)
-│   │   ├── mednext.py             # MedNeXt S/M (ConvNeXt encoder-decoder)
-│   │   ├── blocks.py              # shared conv / residual / upsampling blocks
-│   │   └── __init__.py            # build_network factory + registry
-│   ├── dataset/
-│   │   ├── data_loading.py        # dataset.json loading + target-spacing resampling
-│   │   ├── preprocessing.py       # normalization, resampling, cropping
-│   │   ├── patch_sampler.py       # patch sampling + ROI focusing
-│   │   └── augmentation.py        # 3D augmentation transforms
-│   ├── training/
-│   │   ├── trainer.py             # training loop + validation
-│   │   ├── losses.py              # Dice, CE, clDice, deep supervision
-│   │   └── lr_scheduler.py        # polynomial LR decay
-│   ├── inference/
-│   │   ├── predictor.py           # sliding-window inference
-│   │   └── coarse_to_fine.py      # ROI / two-stage inference
-│   └── utils/
-│       ├── metrics.py             # Dice, HD95, clDice
-│       └── nifti_io.py            # NIfTI I/O
-├── experiments/                   # one module per roadmap step
-│   ├── common.py
-│   ├── exp1_baseline.py ... exp6_models.py
+├── nnunet_utils/            # 官方包的薄封装（不改 nnU-Net 内部）
+│   ├── config.py            # nnUNet_raw/preprocessed/results 路径 + 数据集常量
+│   ├── plans_patch.py       # 编辑 plans 文件的 num_epochs / img_size（官方读回字段）
+│   └── metrics.py           # Dice / HD95 / clDice（最终评估用）
+├── custom_trainers/         # 官方扩展点：自定义 nnUNetTrainer 子类
+│   ├── nnUNetTrainer_DiceCEclDice.py
+│   ├── nnUNetTrainer_UNETR.py / nnUNetTrainer_SwinUNETR.py / nnUNetTrainer_MedNeXt.py
+├── experiments/             # 每个实验的编排脚本（调用官方 CLI）
+├── install_custom_trainers.py
 ├── generate_synthetic_data.py
-├── train.py / predict.py / evaluate.py
-└── run_experiment.py              # python run_experiment.py --exp N
+├── predict.py / evaluate.py / run_experiment.py
+└── requirements.txt
 ```
 
-## Using real data
+## 关键机制说明
 
-Organize data in the nnU-Net convention (`imagesTr`, `labelsTr`, `imagesTs`,
-`dataset.json`) and point `--data_dir` at it. `dataset.json` must contain
-`channel_names`, `labels`, `training`, `test` (and optionally `validation`).
+### 官方入口全部复用
+规划/预处理用 `nnUNetv2_plan_and_preprocess`，训练用 `nnUNetv2_train`，推理用
+`nnUNetv2_predict`（或 `nnUNetPredictor`）。`experiments/common.py` 只负责拼命令，
+环境变量 `nnUNet_raw/preprocessed/results` 指向项目内本地目录（见 `nnunet_utils/config.py`）。
 
-## References
+### 自定义 trainer 的安装（Exp 5/6）
+`nnUNetv2_train` / `nnUNetv2_predict` 按名字在 **已安装的 `nnunetv2` 包内**查找 trainer。
+因此自定义 trainer 需拷贝进该包一次（官方文档的做法）：
 
-- Isensee et al., "nnU-Net: a self-configuring method for deep learning-based
-  biomedical image segmentation." *Nature Methods* 18, 203–211 (2021).
-- Shit et al., "clDice — a novel topology-preserving loss function for tubular
-  structure segmentation." *CVPR* (2021).
-- Hatamizadeh et al., "UNETR: Transformers for 3D medical image segmentation."
-  *WACV* (2022); "Swin UNETR: Swin Transformers for semantic segmentation of
-  brain tumors in MRI images." *MICCAI BrainLes* (2022).
-- Roy et al., "MedNeXt: Transformer-driven scaling of ConvNets for medical image
-  segmentation." *MICCAI* (2023).
+```bash
+python install_custom_trainers.py
+```
+
+Exp 5/6 的脚本会在训练前自动执行这一步（幂等）。
+
+### 自定义网络的输入尺寸（Exp 6）
+UNETR / SwinUNETR 需要固定 `img_size == patch_size`。Exp 6 用独立的 plans
+（`nnUNetPlans_transformer`），并把 `patch_size` 注入 `arch_init_kwargs`（`nnunet_utils/plans_patch.py`）。
+若你的 nnU-Net 版本从别的字段读取 `arch_init_kwargs`，改 `plans_patch.patch_arch_init_kwargs`
+里写入的 key 即可（一处）。
+
+### 目标间距（Exp 3）
+`nnUNetv2_plan_and_preprocess --overwrite_target_spacing 1.0 1.0 1.0 --overwrite_plans_name nnUNetPlans_1mm`
+生成第二套 plans 与预处理数据，与基线 `nnUNetPlans` 互不影响。
+
+## 说明
+
+- 目标 nnU-Net 版本：**≥ 2.2**（`--overwrite_target_spacing` / `--overwrite_plans_name` /
+  6 参数 `build_network_architecture` 静态方法均在该版本起可用）。
+- `runs/`、`predictions/` 是旧自建实现的产物，已废弃，可删除。
+- UNETR/SwinUNETR 对 patch size 与显存较敏感；若显存不足，在对应 trainer 里调小
+  `hidden_size` / `feature_size` / `depths` 或减小 patch size。
+
+## 参考
+
+- Isensee et al., "nnU-Net: a self-configuring method…" *Nature Methods* (2021)
+- Shit et al., "clDice — a novel topology-preserving loss…" *CVPR* (2021)
+- Hatamizadeh et al., "UNETR…" *WACV* (2022); "Swin UNETR…" *MICCAI BrainLes* (2022)
+- Roy et al., "MedNeXt…" *MICCAI* (2023)
