@@ -1,21 +1,23 @@
-"""Exp 4 — ROI localization (coarse stage validation).
+"""Exp 4 — two-stage pancreas / hepatobiliary ROI -> duct segmentation.
 
-For now this is *not* the full two-stage coarse-to-fine: it validates that a
-coarse (3d_lowres) model can localize the target region. Once you have real
-pancreatic-duct / bile-duct GT, turn this into the true two-stage pipeline
-(coarse localize pancreas ROI -> fine segment ducts inside the ROI).
-
-Evaluate the localization with::
-
-    python evaluate.py --pred_dir <lowres_preds> --gt_dir <labelsTs> --localization
+Stage 1 (coarse, 3d_lowres) localizes the pancreas + hepatobiliary ROI on
+``Dataset151_PancreasROI``. Stage 2 (fine, 3d_fullres) segments the pancreatic /
+bile duct inside the ROI on ``Dataset150_PancreasDuct``. Inference that chains
+the two stages lives in ``predict.py --coarse_to_fine``.
 """
+
+from nnunet_utils.config import DATASET_ID, ROI_DATASET_ID
 
 from .common import plan_and_preprocess, train
 
 
 def run(device=None, folds=None):
-    plan_and_preprocess(configurations=("3d_fullres", "3d_lowres"))
-    # coarse stage: locate the ROI (3d_lowres, larger field of view)
-    train("nnUNetTrainer", configuration="3d_lowres", device=device, folds=folds)
-    # fine stage: kept for the future two-stage (full-res within the ROI)
-    train("nnUNetTrainer", configuration="3d_fullres", device=device, folds=folds)
+    # stage 1: ROI localization (coarse)
+    plan_and_preprocess(dataset_id=ROI_DATASET_ID, configurations=("3d_lowres",))
+    # stage 2: duct segmentation (fine)
+    plan_and_preprocess(dataset_id=DATASET_ID, configurations=("3d_fullres",))
+
+    train("nnUNetTrainer", dataset_id=ROI_DATASET_ID, configuration="3d_lowres",
+          device=device, folds=folds)
+    train("nnUNetTrainer", dataset_id=DATASET_ID, configuration="3d_fullres",
+          device=device, folds=folds)

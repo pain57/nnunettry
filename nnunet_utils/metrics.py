@@ -1,8 +1,9 @@
-"""Segmentation metrics for final evaluation: Dice, HD95, clDice, bbox IoU.
+"""Segmentation metrics for final evaluation: Dice, Recall, HD95, ASSD, clDice, bbox IoU.
 
 nnU-Net reports Dice internally during training but does not ship a standalone
-HD95 / clDice command, so these are computed here against a ground-truth folder
-(see ``evaluate.py``). ``bbox_iou`` is used for the Exp 4 ROI-localization check.
+Recall / HD95 / ASSD / clDice command, so these are computed here against a
+ground-truth folder (see ``evaluate.py``). Surface distances (HD95 / ASSD) accept
+the voxel ``spacing`` so they are reported in millimetres, not voxels.
 """
 
 import numpy as np
@@ -20,16 +21,42 @@ def dice_score(pred, gt):
     return 2.0 * float(inter) / float(denom)
 
 
-def hausdorff_distance_95(pred, gt):
+def recall(pred, gt):
+    """Recall / sensitivity = |pred ∩ gt| / |gt|."""
+    pred = np.asarray(pred) > 0.5
+    gt = np.asarray(gt) > 0.5
+    gt_sum = gt.sum()
+    if gt_sum == 0:
+        return float("nan")
+    return float(np.logical_and(pred, gt).sum()) / float(gt_sum)
+
+
+def hausdorff_distance_95(pred, gt, spacing=(1, 1, 1)):
     pred = np.asarray(pred) > 0.5
     gt = np.asarray(gt) > 0.5
     if pred.sum() == 0 or gt.sum() == 0:
         return float("nan")
     p_surf = pred ^ binary_erosion(pred)
     g_surf = gt ^ binary_erosion(gt)
-    dp = distance_transform_edt(~p_surf)
-    dg = distance_transform_edt(~g_surf)
+    dp = distance_transform_edt(~p_surf, sampling=spacing)
+    dg = distance_transform_edt(~g_surf, sampling=spacing)
     return float(max(np.percentile(dp[g_surf], 95), np.percentile(dg[p_surf], 95)))
+
+
+def assd(pred, gt, spacing=(1, 1, 1)):
+    """Average symmetric surface distance (in mm, given the voxel spacing)."""
+    pred = np.asarray(pred) > 0.5
+    gt = np.asarray(gt) > 0.5
+    if pred.sum() == 0 or gt.sum() == 0:
+        return float("nan")
+    p_surf = pred ^ binary_erosion(pred)
+    g_surf = gt ^ binary_erosion(gt)
+    dp = distance_transform_edt(~p_surf, sampling=spacing)
+    dg = distance_transform_edt(~g_surf, sampling=spacing)
+    n = int(g_surf.sum() + p_surf.sum())
+    if n == 0:
+        return float("nan")
+    return float((dp[g_surf].sum() + dg[p_surf].sum()) / n)
 
 
 def cl_dice(pred, gt):

@@ -1,12 +1,14 @@
-"""Generate synthetic 3D CT volumes + pancreatic/bile duct masks in nnU-Net raw format.
+"""Generate synthetic 3D CT volumes in nnU-Net raw format for two datasets:
 
-The segmentation target is the **thin duct structures**, not the whole pancreas:
-
-* label 1 = pancreatic duct (winding tube through the pancreas)
-* label 2 = bile duct (tube from the liver hilum down to the pancreatic head)
+* ``Dataset150_PancreasDuct`` — the main segmentation task:
+  label 1 = pancreatic duct, label 2 = bile duct (thin tubes, **not** merged into
+  the pancreas).
+* ``Dataset151_PancreasROI`` — the Exp 4 coarse-stage target:
+  label 1 = pancreas + hepatobiliary ROI (the anatomical region containing the
+  ducts).
 
 The pancreas, liver, kidneys, spleen and spine stay in the CT as *unlabeled*
-background organs so the image looks realistic; the mask only marks the ducts.
+background organs so the image looks realistic; only the ducts / ROI are labelled.
 
 Spacing defaults to isotropic ``(1.0, 1.0, 1.0)`` mm so sub-mm ducts stay
 resolvable. For the real dataset, spacing is decided automatically by
@@ -20,9 +22,11 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
-from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.ndimage import binary_dilation, gaussian_filter, map_coordinates
 
-from nnunet_utils.config import DATASET_NAME, LABELS, RAW_DIR
+from nnunet_utils.config import (
+    DATASET_NAME, LABELS, RAW_DIR, ROI_DATASET_NAME, ROI_LABELS,
+)
 
 
 def create_ellipsoid(shape, center, axis_lengths, angle_deg=0, deform_scale=5.0):
@@ -129,12 +133,16 @@ def create_bile_duct(shape, pancreas_mask, thickness=1.5, n_points=20):
 
 
 def generate_synthetic_ct(shape=(128, 192, 192), duct_thickness=1.5):
-    """Return (ct_volume, mask) where mask is 0/1/2 (background/pancreatic/bile duct)."""
+    """Return (ct, duct_mask, roi_mask).
+
+    duct_mask: 0/1/2 (background / pancreatic duct / bile duct)
+    roi_mask:  0/1   (pancreas + hepatobiliary ROI)
+    """
     D, H, W = shape
     ct = np.full(shape, 40.0, dtype=np.float32)
     ct += np.random.randn(*shape) * 5.0
 
-    # background organs (unlabeled)
+    # background organs (unlabeled in both datasets)
     liver = create_ellipsoid(shape, (D * 0.55, H * 0.35, W * 0.35),
                              (D * 0.35, H * 0.28, W * 0.18), angle_deg=-10, deform_scale=3)
     ct[liver > 0.5] = np.random.normal(60, 10, size=int(liver.sum()))
@@ -154,25 +162,28 @@ def generate_synthetic_ct(shape=(128, 192, 192), duct_thickness=1.5):
     spine = create_spine(shape)
     ct[spine > 0.5] = np.random.normal(300, 50, size=int(spine.sum()))
 
-    # pancreas (unlabeled background organ that hosts the pancreatic duct)
+    # pancreas (unlabeled background organ hosting the pancreatic duct)
     pancreas = create_ellipsoid(shape, (D * 0.5, H * 0.45, W * 0.55),
                                 (D * 0.08, H * 0.06, W * 0.14), angle_deg=-30, deform_scale=5)
     ct[pancreas > 0.5] = np.random.normal(42, 6, size=int(pancreas.sum()))
 
-    # ducts (the actual labels)
+    # ducts (the actual segmentation labels — kept separate, never merged)
     pd = create_pancreatic_duct(shape, pancreas > 0.5, thickness=duct_thickness)
     bd = create_bile_duct(shape, pancreas > 0.5, thickness=duct_thickness)
-
-    # ducts read as fluid-like (low HU) on CT
-    for duct in (pd, bd):
+    for duct in (pd, bd):  # ducts read as fluid-like (low HU) on CT
         ct[duct > 0.5] = np.random.normal(25, 5, size=int(duct.sum()))
 
     ct = gaussian_filter(ct, sigma=0.8)
 
-    mask = np.zeros(shape, dtype=np.uint8)
-    mask[pd > 0.5] = 1
-    mask[bd > 0.5] = 2  # bile duct overwrites where the two join
-    return ct.astype(np.float32), mask
+    duct_mask = np.zeros(shape, dtype=np.uint8)
+    duct_mask[pd > 0.5] = 1
+    duct_mask[bd > 0.5] = 2  # bile duct overwrites where the two join
+
+    # ROI = pancreas + liver, dilated so it fully encloses the ducts
+    roi = binary_dilation((pancreas > 0.5) | (liver > 0.5), iterations=3)
+    roi_mask = roi.astype(np.uint8)
+
+    return ct.astype(np.float32), duct_mask, roi_mask
 
 
 def _ct_affine(spacing=(1.0, 1.0, 1.0)):
@@ -186,40 +197,56 @@ def _ct_affine(spacing=(1.0, 1.0, 1.0)):
 
 def generate_dataset(output_dir=None, num_train=20, num_test=4, shape=(128, 192, 192),
                      seed=42, duct_thickness=1.5, spacing=(1.0, 1.0, 1.0)):
-    """Write a full synthetic duct dataset in nnU-Net v2 raw format."""
+    """Write the duct dataset (Dataset150) and the ROI dataset (Dataset151)."""
     np.random.seed(seed)
 
-    dataset_dir = Path(output_dir) if output_dir else RAW_DIR / DATASET_NAME
-    for sub in ("imagesTr", "labelsTr", "imagesTs", "labelsTs"):
-        (dataset_dir / sub).mkdir(parents=True, exist_ok=True)
+    base = Path(output_dir) if output_dir else RAW_DIR
+    duct_dir = base / DATASET_NAME
+    roi_dir = base / ROI_DATASET_NAME
+    for d in (duct_dir, roi_dir):
+        for sub in ("imagesTr", "labelsTr", "imagesTs", "labelsTs"):
+            (d / sub).mkdir(parents=True, exist_ok=True)
 
-    print(f"Generating {num_train} train + {num_test} test cases -> {dataset_dir}")
+    print(f"Generating {num_train} train + {num_test} test cases ->\n"
+          f"  ducts: {duct_dir}\n  roi:   {roi_dir}")
 
     def _save_case(case_id, split, with_label=True):
-        ct, mask = generate_synthetic_ct(shape=shape, duct_thickness=duct_thickness)
+        ct, duct_mask, roi_mask = generate_synthetic_ct(shape=shape, duct_thickness=duct_thickness)
         affine = _ct_affine(spacing)
-        nib.save(nib.Nifti1Image(ct, affine), dataset_dir / f"images{split[0:2]}" / f"{case_id}_0000.nii.gz")
-        if with_label:
-            nib.save(nib.Nifti1Image(mask, affine), dataset_dir / f"labels{split[0:2]}" / f"{case_id}.nii.gz")
-        return mask
+
+        for d, mask in ((duct_dir, duct_mask), (roi_dir, roi_mask)):
+            nib.save(nib.Nifti1Image(ct, affine), d / f"images{split[0:2]}" / f"{case_id}_0000.nii.gz")
+            if with_label:
+                nib.save(nib.Nifti1Image(mask, affine), d / f"labels{split[0:2]}" / f"{case_id}.nii.gz")
+        return duct_mask, roi_mask
 
     for i in range(num_train):
         case_id = f"duct_{i:03d}"
-        mask = _save_case(case_id, "Tr")
+        dm, rm = _save_case(case_id, "Tr")
         print(f"  train {i + 1}/{num_train}: {case_id}  "
-              f"pd={(mask == 1).sum()} bd={(mask == 2).sum()}")
+              f"pd={(dm == 1).sum()} bd={(dm == 2).sum()} roi={rm.sum()}")
 
     for i in range(num_test):
         case_id = f"duct_test_{i:03d}"
-        mask = _save_case(case_id, "Ts")
+        dm, rm = _save_case(case_id, "Ts")
         print(f"  test  {i + 1}/{num_test}: {case_id}  "
-              f"pd={(mask == 1).sum()} bd={(mask == 2).sum()}")
+              f"pd={(dm == 1).sum()} bd={(dm == 2).sum()} roi={rm.sum()}")
 
+    _write_dataset_json(duct_dir, DATASET_NAME, LABELS, num_train,
+                        "Synthetic 3D CT with pancreatic-duct and bile-duct masks")
+    _write_dataset_json(roi_dir, ROI_DATASET_NAME, ROI_LABELS, num_train,
+                        "Synthetic 3D CT with pancreas + hepatobiliary ROI masks")
+
+    print(f"\nDatasets written to {base.resolve()}")
+    print("Next:  python run_experiment.py --exp 1")
+
+
+def _write_dataset_json(dataset_dir, name, labels, num_train, description):
     dataset_json = {
-        "name": DATASET_NAME,
-        "description": "Synthetic 3D CT with pancreatic-duct and bile-duct masks",
+        "name": name,
+        "description": description,
         "channel_names": {"0": "CT"},
-        "labels": LABELS,
+        "labels": labels,
         "numTraining": num_train,
         "file_ending": ".nii.gz",
         "overwrite_image_reader_writer": "NibabelIO",
@@ -227,12 +254,9 @@ def generate_dataset(output_dir=None, num_train=20, num_test=4, shape=(128, 192,
     with open(dataset_dir / "dataset.json", "w") as f:
         json.dump(dataset_json, f, indent=2)
 
-    print(f"\nDataset written to {dataset_dir.resolve()}")
-    print("Next:  python run_experiment.py --exp 1")
-
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate synthetic CT duct dataset (nnU-Net raw)")
+    parser = argparse.ArgumentParser(description="Generate synthetic CT duct + ROI datasets (nnU-Net raw)")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--num_train", type=int, default=20)
     parser.add_argument("--num_test", type=int, default=4)

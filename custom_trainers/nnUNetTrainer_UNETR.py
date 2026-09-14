@@ -2,8 +2,10 @@
 
 Single-output network (no deep-supervision heads), so the loss is the plain
 official Dice+CE *without* the DeepSupervisionWrapper. Deep supervision is
-disabled for this experiment in the plans file (see ``patch_plans``), keeping
-the data loader's single target, the network and the loss consistent.
+disabled for this experiment in the plans file (``disable_deep_supervision``).
+
+The input size is read directly from ``self.configuration_manager.patch_size``
+(2.8.1 trainer interface) instead of being injected into the plans file.
 """
 
 import torch.nn as nn
@@ -14,12 +16,11 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class nnUNetTrainer_UNETR(nnUNetTrainer):
-    @staticmethod
-    def build_network_architecture(architecture_class_name, arch_init_kwargs,
+    def build_network_architecture(self, architecture_class_name, arch_init_kwargs,
                                    arch_init_kwargs_req_import, num_input_channels,
                                    num_output_channels, enable_deep_supervision) -> nn.Module:
         from monai.networks.nets import UNETR
-        img_size = tuple(arch_init_kwargs.get("img_size", (96, 96, 96)))
+        img_size = tuple(self.configuration_manager.patch_size)
         return UNETR(
             in_channels=num_input_channels,
             out_channels=num_output_channels,

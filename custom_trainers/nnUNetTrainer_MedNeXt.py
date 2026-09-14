@@ -14,8 +14,7 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class nnUNetTrainer_MedNeXt(nnUNetTrainer):
-    @staticmethod
-    def build_network_architecture(architecture_class_name, arch_init_kwargs,
+    def build_network_architecture(self, architecture_class_name, arch_init_kwargs,
                                    arch_init_kwargs_req_import, num_input_channels,
                                    num_output_channels, enable_deep_supervision) -> nn.Module:
         from MedNeXt import MedNeXt

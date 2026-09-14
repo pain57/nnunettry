@@ -1,7 +1,8 @@
 """Exp 6 — SwinUNETR (MONAI) trainer.
 
 Single-output network (no deep-supervision heads); same plain Dice+CE loss and
-deep-supervision-off setup as the UNETR trainer (see its docstring).
+deep-supervision-off setup as the UNETR trainer (see its docstring). Input size
+is read from ``self.configuration_manager.patch_size``.
 """
 
 import torch.nn as nn
@@ -12,12 +13,11 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class nnUNetTrainer_SwinUNETR(nnUNetTrainer):
-    @staticmethod
-    def build_network_architecture(architecture_class_name, arch_init_kwargs,
+    def build_network_architecture(self, architecture_class_name, arch_init_kwargs,
                                    arch_init_kwargs_req_import, num_input_channels,
                                    num_output_channels, enable_deep_supervision) -> nn.Module:
         from monai.networks.nets import SwinUNETR
-        img_size = tuple(arch_init_kwargs.get("img_size", (96, 96, 96)))
+        img_size = tuple(self.configuration_manager.patch_size)
         return SwinUNETR(
             img_size=img_size,
             in_channels=num_input_channels,
