@@ -1,6 +1,39 @@
+"""Patch-based 3D data sampling with optional ROI focusing (Experiment 4)."""
+
 import torch
 import numpy as np
 from typing import Tuple, Optional, List
+
+
+def _crop_or_pad(volume: np.ndarray, d0: int, h0: int, w0: int,
+                 patch_size: Tuple[int, int, int]) -> np.ndarray:
+    """Crop a patch at (d0,h0,w0) and zero-pad it to exactly patch_size."""
+    pD, pH, pW = patch_size
+    D, H, W = volume.shape
+    patch = volume[d0:d0 + pD, h0:h0 + pH, w0:w0 + pW]
+    if patch.shape != patch_size:
+        padded = np.zeros(patch_size, dtype=patch.dtype)
+        padded[:patch.shape[0], :patch.shape[1], :patch.shape[2]] = patch
+        patch = padded
+    return patch
+
+
+def get_roi_bounds(mask: np.ndarray, margin: int = 16) -> Optional[Tuple[Tuple[int, int], ...]]:
+    """Bounding box of the foreground (pancreas) expanded by margin.
+
+    Returns ((z_min, z_max), (y_min, y_max), (x_min, x_max)) or None if empty.
+    """
+    coords = np.argwhere(mask > 0)
+    if len(coords) == 0:
+        return None
+    z_min, y_min, x_min = coords.min(axis=0)
+    z_max, y_max, x_max = coords.max(axis=0)
+    D, H, W = mask.shape
+    return (
+        (max(0, z_min - margin), min(D, z_max + margin + 1)),
+        (max(0, y_min - margin), min(H, y_max + margin + 1)),
+        (max(0, x_min - margin), min(W, x_max + margin + 1)),
+    )
 
 
 def get_random_patch(
@@ -9,57 +42,36 @@ def get_random_patch(
     patch_size: Tuple[int, int, int],
     force_fg: bool = False,
     fg_min_ratio: float = 0.01,
-) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int, int]]:
-    """
-    Sample a random patch from a 3D volume.
-
-    Args:
-        volume: (D, H, W) image volume.
-        mask: (D, H, W) label mask.
-        patch_size: (PD, PH, PW) desired patch shape.
-        force_fg: If True, resample until patch contains at least fg_min_ratio foreground.
-        fg_min_ratio: Minimum fraction of foreground voxels in the patch.
-
-    Returns:
-        (image_patch, mask_patch, start_coords)
-    """
-    D, H, W = volume.shape
+    roi_bounds: Optional[Tuple[Tuple[int, int], ...]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Sample a random patch (optionally within an ROI / forced foreground)."""
     pD, pH, pW = patch_size
 
-    if force_fg and mask.sum() > 0:
-        # Try up to 50 times to get a patch with foreground
-        for _ in range(50):
-            d0 = np.random.randint(0, max(1, D - pD))
-            h0 = np.random.randint(0, max(1, H - pH))
-            w0 = np.random.randint(0, max(1, W - pW))
-            d_end = min(d0 + pD, D)
-            h_end = min(h0 + pH, H)
-            w_end = min(w0 + pW, W)
-            patch_mask = mask[d0:d_end, h0:h_end, w0:w_end]
-            fg_ratio = patch_mask.sum() / patch_mask.size
-            if fg_ratio >= fg_min_ratio:
-                patch_img = volume[d0:d_end, h0:h_end, w0:w_end]
-                return patch_img, patch_mask, (d0, h0, w0)
+    def sample_once(bounds):
+        (z0, z1), (y0, y1), (x0, x1) = bounds
+        d0 = np.random.randint(z0, max(z0 + 1, z1 - pD)) if z1 - pD > z0 else z0
+        h0 = np.random.randint(y0, max(y0 + 1, y1 - pH)) if y1 - pH > y0 else y0
+        w0 = np.random.randint(x0, max(x0 + 1, x1 - pW)) if x1 - pW > x0 else x0
+        return _crop_or_pad(volume, d0, h0, w0, patch_size), \
+               _crop_or_pad(mask, d0, h0, w0, patch_size), (d0, h0, w0)
 
-    # Fallback: random patch
-    d0 = np.random.randint(0, max(1, D - pD)) if D > pD else 0
-    h0 = np.random.randint(0, max(1, H - pH)) if H > pH else 0
-    w0 = np.random.randint(0, max(1, W - pW)) if W > pW else 0
-    d_end = min(d0 + pD, D)
-    h_end = min(h0 + pH, H)
-    w_end = min(w0 + pW, W)
-    patch_img = volume[d0:d_end, h0:h_end, w0:w_end]
-    patch_mask = mask[d0:d_end, h0:h_end, w0:w_end]
-    return patch_img, patch_mask, (d0, h0, w0)
+    D, H, W = volume.shape
+    full_bounds = ((0, D), (0, H), (0, W))
+    bounds = roi_bounds if roi_bounds is not None else full_bounds
+
+    if force_fg and mask.sum() > 0:
+        for _ in range(50):
+            img_patch, msk_patch, _ = sample_once(bounds)
+            fg_ratio = msk_patch.sum() / msk_patch.size
+            if fg_ratio >= fg_min_ratio:
+                return img_patch, msk_patch, (0, 0, 0)
+
+    img_patch, msk_patch, start = sample_once(bounds)
+    return img_patch, msk_patch, start
 
 
 class PatchSampler:
-    """
-    Patch-based 3D data sampler.
-
-    Yields (image_patch, mask_patch) pairs from a list of volumes,
-    with class-balanced foreground sampling.
-    """
+    """Yields (image_patch, mask_patch) pairs with foreground balancing."""
 
     def __init__(
         self,
@@ -69,24 +81,17 @@ class PatchSampler:
         samples_per_volume: int = 8,
         force_fg_ratio: float = 0.33,
         fg_min_ratio: float = 0.01,
-        fg_class_value: int = 1,
+        use_roi: bool = False,
+        roi_margin: int = 16,
     ):
-        """
-        Args:
-            volumes: List of 3D image arrays.
-            masks: List of 3D label arrays.
-            patch_size: (D, H, W) patch dimensions.
-            samples_per_volume: Number of patches to draw per volume per epoch.
-            force_fg_ratio: Fraction of patches that must contain foreground.
-            fg_min_ratio: Minimum foreground ratio threshold.
-        """
         self.volumes = volumes
         self.masks = masks
         self.patch_size = patch_size
         self.samples_per_volume = samples_per_volume
         self.force_fg_ratio = force_fg_ratio
         self.fg_min_ratio = fg_min_ratio
-
+        self.use_roi = use_roi
+        self.roi_margin = roi_margin
         self.num_samples = samples_per_volume * len(volumes)
 
     def __len__(self) -> int:
@@ -99,30 +104,21 @@ class PatchSampler:
         for vol_idx in range(len(self.volumes)):
             volume = self.volumes[vol_idx]
             mask = self.masks[vol_idx]
+            roi_bounds = get_roi_bounds(mask, self.roi_margin) if self.use_roi else None
             num_fg_patches = int(self.samples_per_volume * self.force_fg_ratio)
 
             for i in range(self.samples_per_volume):
                 force_fg = i < num_fg_patches
-                patch_img, patch_mask, _ = get_random_patch(
+                img_patch, msk_patch, _ = get_random_patch(
                     volume, mask, self.patch_size,
                     force_fg=force_fg, fg_min_ratio=self.fg_min_ratio,
+                    roi_bounds=roi_bounds,
                 )
-                yield patch_img, patch_mask
+                yield img_patch, msk_patch
 
 
 class PatchDataset3D(torch.utils.data.IterableDataset):
-    """
-    Torch IterableDataset for patch-based 3D training.
-
-    Args:
-        volumes: List of preprocessed image volumes (D, H, W) numpy arrays.
-        masks: List of preprocessed label masks (D, H, W) numpy arrays.
-        patch_size: (D, H, W) patch dimensions.
-        samples_per_volume: Patches per volume per epoch.
-        force_fg_ratio: Fraction of patches forced to contain foreground.
-        fg_min_ratio: Min foreground ratio to count as "contains fg".
-        augment_fn: Optional augmentation function (image, label) -> (image, label).
-    """
+    """Torch IterableDataset for patch-based 3D training (with ROI option)."""
 
     def __init__(
         self,
@@ -132,6 +128,8 @@ class PatchDataset3D(torch.utils.data.IterableDataset):
         samples_per_volume: int = 8,
         force_fg_ratio: float = 0.33,
         fg_min_ratio: float = 0.01,
+        use_roi: bool = False,
+        roi_margin: int = 16,
         augment_fn=None,
     ):
         super().__init__()
@@ -141,17 +139,18 @@ class PatchDataset3D(torch.utils.data.IterableDataset):
         self.samples_per_volume = samples_per_volume
         self.force_fg_ratio = force_fg_ratio
         self.fg_min_ratio = fg_min_ratio
+        self.use_roi = use_roi
+        self.roi_margin = roi_margin
         self.augment_fn = augment_fn
 
     def __len__(self) -> int:
         return self.samples_per_volume * len(self.volumes)
 
     def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        # Simple single-worker iteration
         for vol_idx in range(len(self.volumes)):
             volume = self.volumes[vol_idx]
             mask = self.masks[vol_idx]
+            roi_bounds = get_roi_bounds(mask, self.roi_margin) if self.use_roi else None
             num_fg_patches = int(self.samples_per_volume * self.force_fg_ratio)
 
             for i in range(self.samples_per_volume):
@@ -159,13 +158,12 @@ class PatchDataset3D(torch.utils.data.IterableDataset):
                 patch_img, patch_mask, _ = get_random_patch(
                     volume, mask, self.patch_size,
                     force_fg=force_fg, fg_min_ratio=self.fg_min_ratio,
+                    roi_bounds=roi_bounds,
                 )
 
-                # Convert to torch tensors: (1, D, H, W) and (1, D, H, W)
                 img_tensor = torch.from_numpy(patch_img.astype(np.float32)).unsqueeze(0)
                 seg_tensor = torch.from_numpy(patch_mask.astype(np.float32)).unsqueeze(0)
 
-                # Apply augmentation on GPU-compatible tensors
                 if self.augment_fn is not None:
                     img_tensor, seg_tensor = self.augment_fn(img_tensor, seg_tensor)
 

@@ -1,3 +1,5 @@
+"""Training loop, patch-based data loading and validation."""
+
 import os
 import torch
 import torch.nn as nn
@@ -6,8 +8,7 @@ from typing import List, Optional, Dict
 from tqdm import tqdm
 import numpy as np
 
-from ..network.unet3d import UNet3D
-from ..training.losses import DC_and_CE_Loss, DeepSupervisionLoss
+from ..training.losses import build_loss, DeepSupervisionLoss
 from ..training.lr_scheduler import PolyLRScheduler
 from ..dataset.patch_sampler import PatchDataset3D
 from ..dataset.augmentation import get_training_augmentation
@@ -15,11 +16,10 @@ from ..utils.metrics import dice_score
 
 
 class Trainer:
-    """
-    nnU-Net trainer for 3D pancreas segmentation.
+    """nnU-Net trainer for 3D pancreas segmentation.
 
-    Handles the training loop, patch-based data loading,
-    deep supervision loss, and validation.
+    Handles the training loop, patch-based data loading, deep supervision loss,
+    and periodic validation using sliding-window inference.
     """
 
     def __init__(
@@ -39,7 +39,6 @@ class Trainer:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        # ---- Data ----
         self.train_volumes = train_volumes
         self.train_masks = train_masks
         self.val_volumes = val_volumes
@@ -47,20 +46,20 @@ class Trainer:
 
         self.train_aug = get_training_augmentation(p=0.5)
 
-        # ---- Loss with deep supervision ----
-        base_loss = DC_and_CE_Loss(
-            dice_weight=config.dice_weight,
-            ce_weight=config.ce_weight,
-        )
-        if config.deep_supervision:
+        # ---- Loss ----
+        # Only backbones that emit auxiliary outputs (plain / resenc) get the
+        # deep-supervision wrapper; transformer / ConvNeXt backbones return a
+        # single logit tensor and use the base loss directly.
+        base_loss = build_loss(config)
+        supports_ds = bool(getattr(model, "deep_supervision", False))
+        if config.deep_supervision and supports_ds:
             self.criterion = DeepSupervisionLoss(
-                base_loss=base_loss,
-                ds_weights=config.deep_supervision_weights,
+                base_loss=base_loss, ds_weights=config.deep_supervision_weights,
             )
         else:
             self.criterion = base_loss
 
-        # ---- Optimizer & Scheduler ----
+        # ---- Optimizer & scheduler ----
         self.optimizer = torch.optim.SGD(
             self.model.parameters(),
             lr=config.initial_lr,
@@ -86,6 +85,8 @@ class Trainer:
             samples_per_volume=self.config.samples_per_volume,
             force_fg_ratio=self.config.force_fg_ratio,
             fg_min_ratio=self.config.fg_min_ratio,
+            use_roi=self.config.use_roi,
+            roi_margin=self.config.roi_margin,
             augment_fn=self.train_aug,
         )
         return DataLoader(dataset, batch_size=self.config.batch_size, num_workers=0)
@@ -98,8 +99,8 @@ class Trainer:
 
         pbar = tqdm(dataloader, desc=f"Epoch {self.current_epoch + 1}")
         for batch_img, batch_seg in pbar:
-            batch_img = batch_img.to(self.device)  # (B, 1, D, H, W)
-            batch_seg = batch_seg.to(self.device)  # (B, D, H, W)
+            batch_img = batch_img.to(self.device)
+            batch_seg = batch_seg.to(self.device)
 
             self.optimizer.zero_grad()
 
@@ -122,7 +123,7 @@ class Trainer:
 
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """Validate on full validation volumes using sliding window."""
+        """Validate on full volumes with sliding-window inference."""
         if not self.val_volumes or not self.val_masks:
             return {}
 
@@ -139,10 +140,10 @@ class Trainer:
 
         dices = []
         for vol, mask in zip(self.val_volumes, self.val_masks):
-            pred = predictor.predict(vol)  # (D, H, W) integer labels
+            pred = predictor.predict(vol)
             dices.append(dice_score(pred, mask))
 
-        return {"val_dice": np.mean(dices) if dices else 0.0}
+        return {"val_dice": float(np.mean(dices)) if dices else 0.0}
 
     def save_checkpoint(self, filename: str):
         checkpoint = {
@@ -159,49 +160,40 @@ class Trainer:
     def load_checkpoint(self, path: str):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.current_epoch = checkpoint["epoch"]
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.current_epoch = checkpoint.get("epoch", 0)
         self.best_val_dice = checkpoint.get("best_val_dice", 0.0)
         print(f"Loaded checkpoint from {path} (epoch {self.current_epoch})")
 
-    def train(self) -> Dict[str, float]:
-        """
-        Run one full training loop.
-
-        Returns final metrics dict.
-        """
+    def train(self) -> Dict[str, List[float]]:
+        """Run the full training loop. Returns the metric history."""
         history = {"train_loss": [], "val_dice": []}
 
         for epoch in range(self.config.num_epochs):
             self.current_epoch = epoch
 
-            # Update LR
             lr = self.scheduler.step(epoch)
             print(f"\n--- Epoch {epoch + 1}/{self.config.num_epochs} | LR: {lr:.6f} ---")
 
-            # Train
             train_metrics = self.train_epoch()
             history["train_loss"].append(train_metrics["loss"])
             print(f"Train Loss: {train_metrics['loss']:.4f}")
 
-            # Validate
-            if self.val_volumes and (epoch + 1) % 5 == 0:
+            if self.val_volumes and (epoch + 1) % self.config.val_every == 0:
                 val_metrics = self.validate()
-                history["val_dice"].append(val_metrics.get("val_dice", 0.0))
                 val_dice = val_metrics.get("val_dice", 0.0)
+                history["val_dice"].append(val_dice)
                 print(f"Val Dice: {val_dice:.4f}")
 
-                # Save best
                 if val_dice > self.best_val_dice:
                     self.best_val_dice = val_dice
                     self.save_checkpoint("checkpoint_best.pth")
-                    print(f"  → New best! Saved checkpoint.")
+                    print("  -> New best! Saved checkpoint.")
 
-            # Regular save
-            if (epoch + 1) % 100 == 0:
+            if (epoch + 1) % self.config.save_every == 0:
                 self.save_checkpoint(f"checkpoint_epoch_{epoch + 1:04d}.pth")
 
-        # Final save
         self.save_checkpoint("checkpoint_final.pth")
         print(f"\nTraining complete. Best val Dice: {self.best_val_dice:.4f}")
         return history

@@ -1,3 +1,5 @@
+"""NIfTI I/O via nibabel."""
+
 import nibabel as nib
 import numpy as np
 from pathlib import Path
@@ -11,7 +13,16 @@ def load_nifti(filepath: str) -> Tuple[np.ndarray, np.ndarray]:
     return data, img.affine
 
 
-def save_nifti(data: np.ndarray, affine: np.ndarray, filepath: str, header: Optional[nib.Nifti1Header] = None):
+def load_nifti_with_spacing(filepath: str) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float]]:
+    """Load a NIfTI file and return (data_array, affine_matrix, voxel_spacing)."""
+    img = nib.load(filepath)
+    data = img.get_fdata(dtype=np.float32)
+    spacing = tuple(float(z) for z in img.header.get_zooms()[:3])
+    return data, img.affine, spacing
+
+
+def save_nifti(data: np.ndarray, affine: np.ndarray, filepath: str,
+               header: Optional[nib.Nifti1Header] = None):
     """Save a numpy array as a NIfTI file."""
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     img = nib.Nifti1Image(data.astype(np.float32), affine, header=header)
@@ -21,7 +32,6 @@ def save_nifti(data: np.ndarray, affine: np.ndarray, filepath: str, header: Opti
 def save_segmentation_nifti(segmentation: np.ndarray, affine: np.ndarray, filepath: str):
     """Save a segmentation mask as NIfTI (integer labels)."""
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-    # If argmax output is one-hot, squeeze channel dim
     if segmentation.ndim == 4 and segmentation.shape[-1] > 1:
         segmentation = np.argmax(segmentation, axis=-1)
     img = nib.Nifti1Image(segmentation.astype(np.uint8), affine)

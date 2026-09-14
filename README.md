@@ -1,19 +1,19 @@
-# nnU-Net for 3D Pancreas Segmentation
+# nnU-Net 3D Pancreas Segmentation — Experiment Framework
 
-A PyTorch implementation of nnU-Net (no-new-Net) for 3D pancreas segmentation in CT images.
+A self-contained PyTorch implementation of nnU-Net for 3D pancreas segmentation
+in CT, reorganized around a six-step technical roadmap. Each step maps to one
+experiment module and to one knob in [`nnunet/config.py`](nnunet/config.py).
 
-## Overview
+## Technical roadmap
 
-nnU-Net is a self-configuring deep learning framework for biomedical image segmentation. This implementation includes:
-
-- **3D U-Net** with encoder-decoder architecture and skip connections
-- **Deep supervision** with auxiliary segmentation heads at intermediate decoder stages
-- **Instance normalization + LeakyReLU** as in the original nnU-Net
-- **Soft Dice + Cross-Entropy** composite loss
-- **Polynomial LR decay** with Nesterov SGD
-- **3D data augmentation**: flip, rotation, scaling, elastic deformation, gamma, noise, blur
-- **Sliding window inference** with Gaussian importance weighting
-- **Connected-component post-processing** for false positive removal
+| # | Experiment | What it changes | Where |
+|---|------------|-----------------|-------|
+| 1 | **Baseline** — nnU-Net v2, 3D fullres, PlainConvUNet | default backbone + Dice/CE | [exp1_baseline.py](experiments/exp1_baseline.py) |
+| 2 | **Backbone** — ResEnc M / L | residual-encoder U-Net (M/L sizes) | [exp2_backbone.py](experiments/exp2_backbone.py) |
+| 3 | **Target spacing** | resample to isotropic / anisotropic spacing | [exp3_spacing.py](experiments/exp3_spacing.py) |
+| 4 | **ROI / coarse-to-fine** | two-stage localization + ROI sampling | [exp4_roi.py](experiments/exp4_roi.py) |
+| 5 | **Continuity** — Dice+CE vs +clDice | add differentiable clDice term | [exp5_cldice.py](experiments/exp5_cldice.py) |
+| 6 | **Other models** — UNETR / SwinUNETR / MedNeXt | alternative backbones | [exp6_models.py](experiments/exp6_models.py) |
 
 ## Installation
 
@@ -21,125 +21,93 @@ nnU-Net is a self-configuring deep learning framework for biomedical image segme
 pip install -r requirements.txt
 ```
 
-## Quick Start
-
-### 1. Generate Synthetic Data
+## Quick start
 
 ```bash
-python generate_synthetic_data.py --num_train 20 --num_test 4
+# 1. Generate synthetic data (optionally add a thin duct for Exp 3/5)
+python generate_synthetic_data.py --num_train 20 --num_test 4 --add_duct
+
+# 2. Run an experiment (unified entry point)
+python run_experiment.py --exp 1 --data_dir data --device cuda
+python run_experiment.py --exp 6 --data_dir data --device cuda --epochs 200
+
+# or train / predict directly
+python train.py --data_dir data --output_dir runs/exp1 --backbone plain --epochs 1000
+python predict.py --input data/imagesTs --output predictions \
+    --checkpoint runs/exp1/checkpoint_best.pth
+
+# 3. Evaluate
+python evaluate.py --pred_dir predictions --gt_dir data/labelsTs
 ```
 
-This creates a synthetic pancreas CT dataset in `data/` following the nnU-Net convention:
-```
-data/
-├── imagesTr/       # Training images
-├── labelsTr/       # Training labels
-├── imagesTs/       # Test images
-└── dataset.json    # Metadata
-```
+## Experiment notes
 
-### 2. Train
+- **Exp 1** — plain baseline at native spacing; the reference every other
+  experiment is compared against.
+- **Exp 2** — `resenc_m` vs `resenc_l` differ only in encoder channel depth and
+  block count (see `nnunet/network/resenc.py`).
+- **Exp 3** — `--target_spacing` resamples volumes before cropping. Finer
+  isotropic spacing preserves thin structures at higher memory cost.
+- **Exp 4** — a coarse model localizes the pancreas, a fine model (trained with
+  `--use_roi`, sampling patches inside the ground-truth ROI) segments the crop.
+  Combine them at inference with `predict.py --coarse_checkpoint ...`.
+- **Exp 5** — `--loss dice_ce_cldice` adds a differentiable clDice term that
+  rewards topological continuity of thin / tubular structures.
+- **Exp 6** — transformer backbones (`unetr`, `swin_unetr`) and ConvNeXt
+  (`mednext_s`, `mednext_m`). UNETR defaults are reduced to stay tractable on a
+  single GPU.
 
-```bash
-# Quick test (CPU, few epochs):
-python train.py --data_dir data --output_dir runs/exp1 --epochs 10 --batch_size 1 --device cpu
-
-# Full training (GPU recommended):
-python train.py --data_dir data --output_dir runs/exp1 --epochs 1000 --batch_size 2 --device cuda
-```
-
-Key arguments:
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--data_dir` | `data` | Dataset directory with `dataset.json` |
-| `--output_dir` | `runs/exp1` | Checkpoint output directory |
-| `--epochs` | `100` | Number of training epochs |
-| `--batch_size` | `2` | Batch size (reduce for smaller GPU) |
-| `--lr` | `0.01` | Initial learning rate |
-| `--device` | `cuda` | `cuda` or `cpu` |
-| `--val_split` | `0.2` | Validation split fraction |
-| `--resume` | `None` | Resume from checkpoint path |
-
-### 3. Predict
-
-```bash
-# Single case:
-python predict.py --input data/imagesTs/pancreas_test_000_0000.nii.gz \
-                  --output predictions/ \
-                  --checkpoint runs/exp1/checkpoint_best.pth
-
-# Entire directory:
-python predict.py --input data/imagesTs/ \
-                  --output predictions/ \
-                  --checkpoint runs/exp1/checkpoint_best.pth \
-                  --device cuda
-```
-
-## Using Real Data
-
-To use your own pancreas CT dataset:
-
-1. Organize data in nnU-Net format:
-   ```
-   your_data/
-   ├── imagesTr/      # Training images (*_0000.nii.gz)
-   ├── labelsTr/      # Training labels (*.nii.gz)
-   ├── imagesTs/      # Test images (optional)
-   └── dataset.json
-   ```
-
-2. Edit `dataset.json`:
-   ```json
-   {
-     "name": "YourPancreasDataset",
-     "channel_names": {"0": "CT"},
-     "labels": {"background": 0, "pancreas": 1},
-     "numTraining": 100,
-     "training": [
-       {"image": "./imagesTr/case_001_0000.nii.gz",
-        "label": "./labelsTr/case_001.nii.gz"}
-     ],
-     "test": ["./imagesTs/case_test_001_0000.nii.gz"]
-   }
-   ```
-
-3. Train: `python train.py --data_dir your_data --output_dir runs/your_exp`
-
-## Project Structure
+## Project structure
 
 ```
-nnunet/
-├── config.py                  # Configuration dataclass
-├── dataset/
-│   ├── preprocessing.py       # CT normalization, resampling, cropping
-│   ├── augmentation.py        # 3D augmentation transforms
-│   └── patch_sampler.py       # Patch-based data loading
-├── network/
-│   ├── blocks.py              # ConvBlock, UpsampleBlock, SegmentationHead
-│   ├── unet3d.py              # 3D U-Net with deep supervision
-│   └── initialization.py      # Kaiming weight init
-├── training/
-│   ├── trainer.py             # Training loop + validation
-│   ├── losses.py              # Dice, CE, DeepSupervision losses
-│   └── lr_scheduler.py        # Polynomial LR decay
-├── inference/
-│   └── predictor.py           # Sliding window + post-processing
-└── utils/
-    ├── metrics.py              # Dice score, Hausdorff distance
-    └── nifti_io.py            # NIfTI I/O via nibabel
+胰腺分割/
+├── nnunet/
+│   ├── config.py                  # single dataclass driving all experiments
+│   ├── network/
+│   │   ├── unet3d.py              # PlainConvUNet (baseline)
+│   │   ├── resenc.py              # ResEncUNet M/L (residual encoder)
+│   │   ├── unetr.py               # UNETR (ViT encoder)
+│   │   ├── swin_unetr.py          # SwinUNETR (Swin Transformer encoder)
+│   │   ├── mednext.py             # MedNeXt S/M (ConvNeXt encoder-decoder)
+│   │   ├── blocks.py              # shared conv / residual / upsampling blocks
+│   │   └── __init__.py            # build_network factory + registry
+│   ├── dataset/
+│   │   ├── data_loading.py        # dataset.json loading + target-spacing resampling
+│   │   ├── preprocessing.py       # normalization, resampling, cropping
+│   │   ├── patch_sampler.py       # patch sampling + ROI focusing
+│   │   └── augmentation.py        # 3D augmentation transforms
+│   ├── training/
+│   │   ├── trainer.py             # training loop + validation
+│   │   ├── losses.py              # Dice, CE, clDice, deep supervision
+│   │   └── lr_scheduler.py        # polynomial LR decay
+│   ├── inference/
+│   │   ├── predictor.py           # sliding-window inference
+│   │   └── coarse_to_fine.py      # ROI / two-stage inference
+│   └── utils/
+│       ├── metrics.py             # Dice, HD95, clDice
+│       └── nifti_io.py            # NIfTI I/O
+├── experiments/                   # one module per roadmap step
+│   ├── common.py
+│   ├── exp1_baseline.py ... exp6_models.py
+├── generate_synthetic_data.py
+├── train.py / predict.py / evaluate.py
+└── run_experiment.py              # python run_experiment.py --exp N
 ```
 
-## Architecture
+## Using real data
 
-The 3D U-Net follows the nnU-Net design:
-
-- **Encoder**: 5 stages, each with 2× Conv3d → InstanceNorm → LeakyReLU, stride-2 downsampling from stage 2
-- **Bottleneck**: 2× ConvBlock at 16× downsampled resolution
-- **Decoder**: 5 stages with trilinear upsampling + skip connections
-- **Deep Supervision**: Auxiliary heads at the 2 lowest-resolution decoder outputs
-- **Initial features**: 32 (doubles each stage → 32, 64, 128, 256, 320 at bottleneck)
+Organize data in the nnU-Net convention (`imagesTr`, `labelsTr`, `imagesTs`,
+`dataset.json`) and point `--data_dir` at it. `dataset.json` must contain
+`channel_names`, `labels`, `training`, `test` (and optionally `validation`).
 
 ## References
 
-- Isensee, F., et al. "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation." *Nature Methods* 18, 203–211 (2021).
-- Original nnU-Net: https://github.com/MIC-DKFZ/nnUNet
+- Isensee et al., "nnU-Net: a self-configuring method for deep learning-based
+  biomedical image segmentation." *Nature Methods* 18, 203–211 (2021).
+- Shit et al., "clDice — a novel topology-preserving loss function for tubular
+  structure segmentation." *CVPR* (2021).
+- Hatamizadeh et al., "UNETR: Transformers for 3D medical image segmentation."
+  *WACV* (2022); "Swin UNETR: Swin Transformers for semantic segmentation of
+  brain tumors in MRI images." *MICCAI BrainLes* (2022).
+- Roy et al., "MedNeXt: Transformer-driven scaling of ConvNets for medical image
+  segmentation." *MICCAI* (2023).

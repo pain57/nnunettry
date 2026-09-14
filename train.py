@@ -1,211 +1,133 @@
 #!/usr/bin/env python3
-"""
-Training script for nnU-Net 3D multi-organ (AMOS22) / pancreas segmentation.
+"""Training entry point for all six pancreas-segmentation experiments.
 
-Usage:
-    # Synthetic data:
-    python train.py --data_dir data --output_dir runs/exp1 --epochs 100
+The experiment is fully described by the command-line flags, which map to
+fields of :class:`nnunet.config.NNUnetConfig`:
 
-    # AMOS22 dataset:
-    python train.py --data_dir data_amos22 --output_dir runs/amos22 \
-        --epochs 1000 --num_classes 16 --batch_size 2 --device cuda
+    python train.py --data_dir data --output_dir runs/exp1_baseline \
+        --backbone plain --epochs 1000
 
-    # AMOS22 MRI-only (only use MRI cases, id >= 500):
-    python train.py --data_dir data_amos22 --output_dir runs/amos22_mri \
-        --epochs 1000 --num_classes 16 --modality mri --batch_size 2 --device cuda
+    # Experiment 2 (residual encoder):
+    python train.py --data_dir data --output_dir runs/exp2_resenc_m --backbone resenc_m
 
-    # AMOS22 all modalities:
-    python train.py --data_dir data_amos22 --output_dir runs/amos22_all \
-        --epochs 1000 --num_classes 16 --modality all --batch_size 2 --device cuda
+    # Experiment 3 (target spacing):
+    python train.py --data_dir data --output_dir runs/exp3_1mm \
+        --target_spacing 1.0,1.0,1.0
+
+    # Experiment 4 (ROI-focused fine stage):
+    python train.py --data_dir data --output_dir runs/exp4_fine --use_roi
+
+    # Experiment 5 (continuity loss):
+    python train.py --data_dir data --output_dir runs/exp5_cldice --loss dice_ce_cldice
+
+    # Experiment 6 (other architectures):
+    python train.py --data_dir data --output_dir runs/exp6_unetr --backbone unetr
 """
 
 import argparse
-import json
-import os
-from pathlib import Path
 import numpy as np
-import torch
 
 from nnunet.config import NNUnetConfig
-from nnunet.network.unet3d import build_3d_unet
+from nnunet.network import build_network, BACKBONE_CHOICES
 from nnunet.training.trainer import Trainer
-from nnunet.utils.nifti_io import load_nifti
-from nnunet.dataset.preprocessing import (
-    normalize_volume,
-    resample_volume,
-    foreground_crop,
-)
+from nnunet.dataset.data_loading import load_dataset
 
 
-def preprocess_case(image_path: str, mask_path: str, config: NNUnetConfig,
-                    pancreas_only: bool = False, modality: str = "ct"):
-    """Load and preprocess a single case."""
-    image, affine = load_nifti(image_path)
-    mask, _ = load_nifti(mask_path)
-
-    # Modality-specific normalization
-    image = normalize_volume(image, modality=modality)
-
-    # If pancreas-only: filter mask to keep only label 10 (pancreas)
-    if pancreas_only:
-        mask = (mask == 10).astype(np.int64)
-
-    # Crop to foreground (with more margin for abdomen)
-    image, mask, _ = foreground_crop(image, mask, margin=30)
-
-    return image.astype(np.float32), mask.astype(np.int64)
-
-
-def load_dataset(data_dir: str, config: NNUnetConfig, mode: str = "train",
-                 pancreas_only: bool = False, modality: str = "ct"):
-    """
-    Load and preprocess all cases from a dataset.json file.
-
-    Args:
-        data_dir: Path to dataset root.
-        config: NNUnetConfig instance.
-        mode: "train", "validation", or "test".
-        pancreas_only: If True, filter labels to keep only pancreas (label 10).
-        modality: "ct" (id < 500), "mri" (id >= 500), or "all" (no filter).
-    """
-    dataset_json_path = Path(data_dir) / "dataset.json"
-    if not dataset_json_path.exists():
-        raise FileNotFoundError(
-            f"dataset.json not found in {data_dir}. "
-            f"Run generate_synthetic_data.py first."
+def parse_spacing(s: str):
+    """Parse a 'a,b,c' string into a tuple of floats."""
+    try:
+        return tuple(float(x) for x in s.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"target spacing must be 'a,b,c' (got {s!r})"
         )
-
-    with open(dataset_json_path) as f:
-        dataset_info = json.load(f)
-
-    base_dir = Path(data_dir)
-
-    images = []
-    masks = []
-
-    if mode in ("train", "validation"):
-        key = "training" if mode == "train" else "validation"
-        cases = dataset_info.get(key, [])
-
-        for case in cases:
-            img_path = base_dir / case["image"]
-            lbl_path = base_dir / case["label"]
-
-            # AMOS22: CT cases have id < 500, MRI cases have id >= 500
-            case_id = int(case["image"].split("/")[-1].split("_")[-1].replace(".nii.gz", ""))
-            is_mri = case_id >= 500
-
-            if modality == "ct" and is_mri:
-                print(f"  Skipped (MRI): {img_path.name}")
-                continue
-            if modality == "mri" and not is_mri:
-                print(f"  Skipped (CT): {img_path.name}")
-                continue
-
-            if img_path.exists() and lbl_path.exists():
-                img, msk = preprocess_case(str(img_path), str(lbl_path), config,
-                                           pancreas_only=pancreas_only, modality=modality)
-                images.append(img)
-                masks.append(msk)
-                tag = "MRI" if is_mri else "CT"
-                print(f"  Loaded [{tag}]: {img_path.name} | shape: {img.shape} | mask voxels: {msk.sum()}")
-
-    elif mode == "test":
-        cases = dataset_info.get("test", [])
-        for case in cases:
-            if isinstance(case, dict):
-                img_path = base_dir / case["image"]
-            else:
-                img_path = base_dir / case
-            if img_path.exists():
-                img, _ = load_nifti(str(img_path))
-                img = normalize_volume(img, modality=modality)
-                images.append(img.astype(np.float32))
-                print(f"  Loaded test: {img_path.name} | shape: {img.shape}")
-
-    return images, masks
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train nnU-Net for 3D multi-organ segmentation")
-    parser.add_argument("--data_dir", type=str, default="data",
-                        help="Data directory with dataset.json")
-    parser.add_argument("--output_dir", type=str, default="runs/exp1",
-                        help="Output directory for checkpoints")
-    parser.add_argument("--epochs", type=int, default=100,
-                        help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=2,
-                        help="Batch size")
-    parser.add_argument("--lr", type=float, default=0.01,
-                        help="Initial learning rate")
-    parser.add_argument("--num_classes", type=int, default=16,
-                        help="Number of output classes (including background)")
-    parser.add_argument("--device", type=str, default="cuda",
-                        help="Device: cuda or cpu")
+    parser = argparse.ArgumentParser(description="Train nnU-Net for 3D pancreas segmentation")
+    parser.add_argument("--data_dir", type=str, default="data", help="Dataset directory with dataset.json")
+    parser.add_argument("--output_dir", type=str, default="runs/exp1", help="Checkpoint output directory")
+    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument("--num_classes", type=int, default=2, help="Classes incl. background")
+    parser.add_argument("--backbone", type=str, default="plain", choices=BACKBONE_CHOICES)
+    parser.add_argument("--target_spacing", type=parse_spacing, default=None,
+                        help="Resample to voxel spacing, e.g. 1.0,1.0,1.0 (Exp3)")
+    parser.add_argument("--loss", type=str, default="dice_ce",
+                        choices=["dice_ce", "dice_ce_cldice"])
+    parser.add_argument("--cldice_weight", type=float, default=1.0)
+    parser.add_argument("--cldice_iters", type=int, default=3)
+    parser.add_argument("--use_roi", action="store_true",
+                        help="Sample training patches inside the GT pancreas ROI (Exp4)")
+    parser.add_argument("--roi_margin", type=int, default=16)
     parser.add_argument("--val_split", type=float, default=0.0,
-                        help="Fraction of training data for validation "
-                             "(set 0 to use dataset.json 'validation' key)")
+                        help="Fraction of training data for validation")
+    parser.add_argument("--val_every", type=int, default=5)
     parser.add_argument("--pancreas_only", action="store_true",
-                        help="Filter mask to keep only pancreas (label 10)")
-    parser.add_argument("--modality", type=str, default="ct", choices=["ct", "mri", "all"],
-                        help="Modality filter: ct (id<500), mri (id>=500), all (no filter)")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Resume from checkpoint")
+                        help="Filter labels to keep only pancreas (label 10)")
+    parser.add_argument("--modality", type=str, default="ct", choices=["ct", "mri", "all"])
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
 
-    # ---- Config ----
     config = NNUnetConfig()
     config.num_epochs = args.epochs
     config.batch_size = args.batch_size
     config.initial_lr = args.lr
     config.num_classes = args.num_classes
+    config.backbone = args.backbone
+    config.target_spacing = args.target_spacing
+    config.loss = args.loss
+    config.cldice_weight = args.cldice_weight
+    config.cldice_iters = args.cldice_iters
+    config.use_roi = args.use_roi
+    config.roi_margin = args.roi_margin
+    config.val_every = args.val_every
 
-    print("=" * 60)
-    print("nnU-Net 3D Multi-Organ Segmentation — Training")
-    print("=" * 60)
-    print(f"Config:\n  Epochs: {config.num_epochs}\n  Batch: {config.batch_size}")
-    print(f"  LR: {config.initial_lr}\n  Patch: {config.patch_size}")
-    print(f"  Classes: {config.num_classes}\n  Device: {args.device}")
-    print(f"  Modality: {args.modality}")
-    if args.pancreas_only:
-        print("  Mode: Pancreas-only (label 10)")
+    print("=" * 64)
+    print("nnU-Net 3D Pancreas Segmentation — Training")
+    print("=" * 64)
+    print(f"  Backbone: {config.backbone} | Loss: {config.loss} | Classes: {config.num_classes}")
+    print(f"  Target spacing: {config.target_spacing}")
+    print(f"  ROI sampling: {config.use_roi} (margin {config.roi_margin})")
+    print(f"  Epochs: {config.num_epochs} | Batch: {config.batch_size} | LR: {config.initial_lr}")
+    print(f"  Device: {args.device}")
 
-    # ---- Load Data ----
+    # ---- Data ----
     print(f"\nLoading training data from {args.data_dir}...")
-    train_images, train_masks = load_dataset(args.data_dir, config, mode="train",
-                                              pancreas_only=args.pancreas_only,
-                                              modality=args.modality)
+    train_images, train_masks, _ = load_dataset(
+        args.data_dir, config, mode="train",
+        pancreas_only=args.pancreas_only, modality=args.modality,
+    )
     print(f"Loaded {len(train_images)} training cases.")
 
-    # Load validation data
     if args.val_split > 0:
-        # Random split from training
-        np.random.seed(42)
-        indices = np.random.permutation(len(train_images))
+        rng = np.random.RandomState(42)
+        indices = rng.permutation(len(train_images))
         val_size = max(1, int(len(train_images) * args.val_split))
-        train_idx = indices[val_size:]
-        val_idx = indices[:val_size]
+        val_idx, train_idx = indices[:val_size], indices[val_size:]
         val_images = [train_images[i] for i in val_idx]
         val_masks = [train_masks[i] for i in val_idx]
         train_images = [train_images[i] for i in train_idx]
         train_masks = [train_masks[i] for i in train_idx]
     else:
-        # Use dataset.json 'validation' split (e.g. AMOS imagesVa/labelsVa)
         print(f"\nLoading validation data from {args.data_dir}...")
-        val_images, val_masks = load_dataset(args.data_dir, config, mode="validation",
-                                              pancreas_only=args.pancreas_only,
-                                              modality=args.modality)
+        val_images, val_masks, _ = load_dataset(
+            args.data_dir, config, mode="validation",
+            pancreas_only=args.pancreas_only, modality=args.modality,
+        )
         print(f"Loaded {len(val_images)} validation cases.")
 
     print(f"Train: {len(train_images)} | Val: {len(val_images)}")
 
-    # ---- Build Model ----
-    print("\nBuilding 3D U-Net...")
-    model = build_3d_unet(config)
+    # ---- Model ----
+    print(f"\nBuilding backbone '{config.backbone}'...")
+    model = build_network(config)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {num_params:,}")
 
-    # ---- Trainer ----
+    # ---- Train ----
     trainer = Trainer(
         model=model,
         config=config,
@@ -216,11 +138,9 @@ def main():
         output_dir=args.output_dir,
         device=args.device,
     )
-
     if args.resume:
         trainer.load_checkpoint(args.resume)
 
-    # ---- Train ----
     print(f"\nStarting training for {config.num_epochs} epochs...")
     history = trainer.train()
 

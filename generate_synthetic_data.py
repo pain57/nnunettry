@@ -111,9 +111,52 @@ def create_vessels(shape, pancreas_mask):
     return vessels
 
 
-def generate_synthetic_ct(shape=(128, 192, 192)):
+def create_thin_duct(shape, pancreas_mask, thickness=1.5, jitter=2.0, n_points=20):
+    """
+    Create a thin, winding tube through the pancreas (mimics the pancreatic
+    duct). Merging it into the pancreas label gives the target a thin, tortuous
+    component that stresses topological continuity (relevant for Experiments 3
+    and 5 — target spacing and clDice).
+    """
+    D, H, W = shape
+    duct = np.zeros(shape, dtype=np.float32)
+
+    if not pancreas_mask.any():
+        return duct
+
+    coords = np.argwhere(pancreas_mask > 0)
+    x_min, x_max = coords[:, 2].min(), coords[:, 2].max()
+    y_mean = coords[:, 1].mean()
+    z_mean = coords[:, 0].mean()
+
+    # Random walk along the long (X) axis of the pancreas.
+    xs = np.linspace(x_min, x_max, n_points)
+    ys = [y_mean]
+    zs = [z_mean]
+    for _ in range(n_points - 1):
+        ys.append(ys[-1] + np.random.uniform(-jitter, jitter))
+        zs.append(zs[-1] + np.random.uniform(-jitter, jitter))
+
+    Z, Y, X = np.meshgrid(
+        np.arange(D, dtype=np.float32),
+        np.arange(H, dtype=np.float32),
+        np.arange(W, dtype=np.float32),
+        indexing="ij",
+    )
+    for zc, yc, xc in zip(zs, ys, xs):
+        dist = (X - xc) ** 2 + (Y - yc) ** 2 + (Z - zc) ** 2
+        duct[dist <= thickness ** 2] = 1.0
+
+    return duct
+
+
+def generate_synthetic_ct(shape=(128, 192, 192), add_duct=False, duct_thickness=1.5):
     """
     Generate one synthetic CT volume with pancreas label.
+
+    Args:
+        shape: (D, H, W) volume shape.
+        add_duct: If True, merge a thin winding duct into the pancreas label.
 
     Returns:
         (ct_volume, pancreas_mask)
@@ -161,6 +204,12 @@ def generate_synthetic_ct(shape=(128, 192, 192)):
         shape, pancreas_center, pancreas_axes, angle_deg=-30, deform_scale=5
     )
 
+    # ---- Optional thin pancreatic duct (continuity experiments) ----
+    if add_duct:
+        duct = create_thin_duct(shape, pancreas > 0.5, thickness=duct_thickness)
+        near = binary_dilation(pancreas > 0.5, iterations=4)
+        pancreas = np.maximum(pancreas > 0.5, (duct > 0.5) & near).astype(np.float32)
+
     # Set pancreas CT values (~35-50 HU, slightly hypodense vs liver)
     ct[pancreas > 0.5] = np.random.normal(42, 6, size=int(pancreas.sum()))
 
@@ -183,6 +232,8 @@ def generate_dataset(
     num_test: int = 4,
     shape: tuple = (128, 192, 192),
     seed: int = 42,
+    add_duct: bool = False,
+    duct_thickness: float = 1.5,
 ):
     """Generate a full synthetic pancreas CT dataset."""
     np.random.seed(seed)
@@ -200,14 +251,16 @@ def generate_dataset(
     # ---- Training data ----
     for i in range(num_train):
         case_id = f"pancreas_{i:03d}"
-        ct, mask = generate_synthetic_ct(shape=shape)
+        ct, mask = generate_synthetic_ct(shape=shape, add_duct=add_duct,
+                                         duct_thickness=duct_thickness)
 
-        # Save as NIfTI
+        # Save as NIfTI. The volume is stored as (Z, Y, X); the affine diagonal
+        # must therefore be (spacing_z, spacing_y, spacing_x).
         affine = np.eye(4)
-        spacing = (1.5, 1.0, 1.0)  # typical CT spacing
-        affine[0, 0] = spacing[2]
-        affine[1, 1] = spacing[1]
-        affine[2, 2] = spacing[0]
+        spacing = (1.5, 1.0, 1.0)  # typical CT spacing (z, y, x)
+        affine[0, 0] = spacing[0]  # z (slice thickness)
+        affine[1, 1] = spacing[1]  # y
+        affine[2, 2] = spacing[2]  # x
 
         img_nii = nib.Nifti1Image(ct, affine)
         mask_nii = nib.Nifti1Image(mask.astype(np.uint8), affine)
@@ -219,13 +272,14 @@ def generate_dataset(
     # ---- Test data ----
     for i in range(num_test):
         case_id = f"pancreas_test_{i:03d}"
-        ct, mask = generate_synthetic_ct(shape=shape)
+        ct, mask = generate_synthetic_ct(shape=shape, add_duct=add_duct,
+                                         duct_thickness=duct_thickness)
 
         affine = np.eye(4)
-        spacing = (1.5, 1.0, 1.0)
-        affine[0, 0] = spacing[2]
+        spacing = (1.5, 1.0, 1.0)  # (z, y, x)
+        affine[0, 0] = spacing[0]
         affine[1, 1] = spacing[1]
-        affine[2, 2] = spacing[0]
+        affine[2, 2] = spacing[2]
 
         img_nii = nib.Nifti1Image(ct, affine)
         nib.save(img_nii, str(images_ts_dir / f"{case_id}_0000.nii.gz"))
@@ -274,6 +328,10 @@ if __name__ == "__main__":
                         help="Number of test cases")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
+    parser.add_argument("--add_duct", action="store_true",
+                        help="Merge a thin winding duct into the pancreas label")
+    parser.add_argument("--duct_thickness", type=float, default=1.5,
+                        help="Duct radius in voxels (only with --add_duct)")
     args = parser.parse_args()
 
     generate_dataset(
@@ -281,4 +339,6 @@ if __name__ == "__main__":
         num_train=args.num_train,
         num_test=args.num_test,
         seed=args.seed,
+        add_duct=args.add_duct,
+        duct_thickness=args.duct_thickness,
     )

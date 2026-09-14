@@ -1,20 +1,16 @@
+"""Intensity normalization, resampling and cropping utilities."""
+
 import numpy as np
 from typing import Tuple, Optional
-from scipy.ndimage import zoom, binary_fill_holes
+from scipy.ndimage import zoom
 
 
 def ct_intensity_normalization(
     image: np.ndarray,
     lower_percentile: float = 0.5,
     upper_percentile: float = 99.5,
-    clip_min: float = -79.0,
-    clip_max: float = 304.0,
 ) -> np.ndarray:
-    """
-    CT-specific intensity normalization:
-    1. Clip to [0.5, 99.5] percentile to remove outliers.
-    2. Z-score normalize: (x - mean) / std using the clipped foreground.
-    """
+    """CT normalization: clip to percentile range then z-score the foreground."""
     p_low = np.percentile(image, lower_percentile)
     p_high = np.percentile(image, upper_percentile)
     image = np.clip(image, p_low, p_high)
@@ -30,7 +26,7 @@ def ct_intensity_normalization(
 
 
 def zscore_normalization(image: np.ndarray) -> np.ndarray:
-    """Standard Z-score normalization across the whole volume."""
+    """Standard z-score normalization across the whole volume."""
     mean = image.mean()
     std = image.std()
     if std > 0:
@@ -39,16 +35,11 @@ def zscore_normalization(image: np.ndarray) -> np.ndarray:
 
 
 def mri_intensity_normalization(image: np.ndarray) -> np.ndarray:
-    """
-    MRI-specific intensity normalization:
-    1. Clip to [0.5, 99.5] percentile to remove outlier noise.
-    2. Z-score normalize using non-zero foreground.
-    (MRI has no standard intensity scale like CT HU, so we normalize per-volume.)
-    """
+    """MRI normalization (per-volume z-score of non-zero foreground)."""
     p_low = np.percentile(image, 0.5)
     p_high = np.percentile(image, 99.5)
     image = np.clip(image, p_low, p_high)
-    mask = image > 0  # MRI background is usually 0
+    mask = image > 0
     if mask.any():
         mean = image[mask].mean()
         std = image[mask].std()
@@ -60,17 +51,10 @@ def mri_intensity_normalization(image: np.ndarray) -> np.ndarray:
 
 
 def normalize_volume(image: np.ndarray, modality: str = "ct") -> np.ndarray:
-    """
-    Dispatch to the correct intensity normalization based on modality.
-
-    Args:
-        image: 3D image array.
-        modality: "ct" or "mri".
-    """
+    """Dispatch intensity normalization by modality ('ct' or 'mri')."""
     if modality == "mri":
         return mri_intensity_normalization(image)
-    else:
-        return ct_intensity_normalization(image)
+    return ct_intensity_normalization(image)
 
 
 def resample_volume(
@@ -79,19 +63,30 @@ def resample_volume(
     target_spacing: Tuple[float, float, float],
     is_label: bool = False,
     order: int = 1,
-) -> Tuple[np.ndarray, Tuple[float, float, float]]:
-    """
-    Resample a 3D volume to target spacing.
-    If is_label, uses nearest-neighbor interpolation (order=0).
-    Returns (resampled_volume, new_shape).
+) -> np.ndarray:
+    """Resample a 3D volume to a target voxel spacing.
+
+    Labels use nearest-neighbor interpolation (order=0); images use the given
+    order (1=linear, 3=cubic).
     """
     zoom_factors = tuple(o / t for o, t in zip(original_spacing, target_spacing))
     if is_label:
-        resampled = zoom(volume, zoom_factors, order=0, prefilter=False)
-    else:
-        resampled = zoom(volume, zoom_factors, order=order)
+        return zoom(volume, zoom_factors, order=0, prefilter=False)
+    return zoom(volume, zoom_factors, order=order)
 
-    return resampled
+
+def resample_to_target_spacing(
+    image: np.ndarray,
+    mask: np.ndarray,
+    original_spacing: Tuple[float, float, float],
+    target_spacing: Tuple[float, float, float],
+    order_image: int = 3,
+    order_label: int = 0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Resample an image/label pair to a common target spacing (Experiment 3)."""
+    image = resample_volume(image, original_spacing, target_spacing, is_label=False, order=order_image)
+    mask = resample_volume(mask, original_spacing, target_spacing, is_label=True, order=order_label)
+    return image, mask
 
 
 def foreground_crop(
@@ -99,11 +94,7 @@ def foreground_crop(
     mask: Optional[np.ndarray] = None,
     margin: int = 10,
 ) -> Tuple[np.ndarray, Optional[np.ndarray], Tuple[slice, slice, slice]]:
-    """
-    Crop to the foreground bounding box (non-zero region) with a margin.
-    If mask is provided, use it to determine foreground; otherwise use image > 0.
-    Returns (cropped_image, cropped_mask, crop_slices).
-    """
+    """Crop to the foreground bounding box with a margin."""
     if mask is not None:
         fg = mask > 0
     else:
@@ -134,10 +125,7 @@ def pad_to_patch_size(
     volume: np.ndarray,
     patch_size: Tuple[int, int, int],
 ) -> Tuple[np.ndarray, Tuple[int, int, int]]:
-    """
-    Pad a volume so each spatial dimension is at least patch_size.
-    Returns (padded_volume, original_shape).
-    """
+    """Pad a volume so each spatial dimension is at least patch_size."""
     original_shape = volume.shape
     pad_dims = []
     for s, p in zip(volume.shape, patch_size):
