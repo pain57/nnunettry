@@ -1,13 +1,16 @@
-"""Exp 5 — continuity: Dice+CE (baseline) vs Dice+CE+clDice."""
+"""Exp 5 — topology-aware loss: Dice+CE vs Dice+CE+clDice.
 
-from .common import ensure_custom_trainers_installed, plan_and_preprocess, set_num_epochs, train
+Compares the official ``nnUNetTrainer`` (Dice+CE) against the custom
+``nnUNetTrainer_DiceCEclDice``. The clDice trainer applies a soft-skeletonized
+clDice on the full-resolution head and is deep-supervision compatible.
+"""
+
+from .common import ensure_custom_trainers_installed, plan_and_preprocess, train
 
 
-def run(device=None, epochs=None):
+def run(device=None, folds=None):
     plan_and_preprocess()
-    if epochs:
-        set_num_epochs(epochs)
     ensure_custom_trainers_installed()
 
-    train("nnUNetTrainer", device=device)               # Dice + CE
-    train("nnUNetTrainer_DiceCEclDice", device=device)   # Dice + CE + clDice
+    train("nnUNetTrainer", device=device, folds=folds)
+    train("nnUNetTrainer_DiceCEclDice", device=device, folds=folds)

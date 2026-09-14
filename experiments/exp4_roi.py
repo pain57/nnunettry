@@ -1,20 +1,21 @@
-"""Exp 4 — ROI / coarse-to-fine: 3d_lowres localizes, 3d_fullres refines.
+"""Exp 4 — ROI localization (coarse stage validation).
 
-nnU-Net already generates a ``3d_lowres`` configuration, which serves as the
-coarse stage; the ``3d_fullres`` model is the fine stage. Two-stage inference
-(the ROI crop + paste-back) is implemented in ``predict.py --coarse_to_fine``.
+For now this is *not* the full two-stage coarse-to-fine: it validates that a
+coarse (3d_lowres) model can localize the target region. Once you have real
+pancreatic-duct / bile-duct GT, turn this into the true two-stage pipeline
+(coarse localize pancreas ROI -> fine segment ducts inside the ROI).
+
+Evaluate the localization with::
+
+    python evaluate.py --pred_dir <lowres_preds> --gt_dir <labelsTs> --localization
 """
 
-from .common import plan_and_preprocess, set_num_epochs, train
+from .common import plan_and_preprocess, train
 
 
-def run(device=None, epochs=None):
+def run(device=None, folds=None):
     plan_and_preprocess(configurations=("3d_fullres", "3d_lowres"))
-    if epochs:
-        set_num_epochs(epochs, configuration="3d_fullres")
-        set_num_epochs(epochs, configuration="3d_lowres")
-
-    train("nnUNetTrainer", configuration="3d_lowres", device=device)   # coarse (localization)
-    train("nnUNetTrainer", configuration="3d_fullres", device=device)  # fine (segmentation)
-
-    print("\nTwo-stage inference:  python predict.py --coarse_to_fine --input <images> --output <out>")
+    # coarse stage: locate the ROI (3d_lowres, larger field of view)
+    train("nnUNetTrainer", configuration="3d_lowres", device=device, folds=folds)
+    # fine stage: kept for the future two-stage (full-res within the ROI)
+    train("nnUNetTrainer", configuration="3d_fullres", device=device, folds=folds)

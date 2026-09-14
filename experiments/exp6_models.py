@@ -1,19 +1,23 @@
-"""Exp 6 — compare UNETR / SwinUNETR / MedNeXt against the baseline."""
+"""Exp 6 — UNETR / SwinUNETR / MedNeXt comparison.
 
-from nnunet_utils.plans_patch import patch_arch_init_kwargs
+Uses a dedicated plans identifier and patches it to (a) inject the fixed
+``img_size`` those backbones need and (b) disable deep supervision, since they
+have no DS heads. All three are single-output networks trained with the official
+Dice+CE loss (no DS wrapper).
+"""
 
-from .common import ensure_custom_trainers_installed, plan_and_preprocess, set_num_epochs, train
+from nnunet_utils.plans_patch import patch_plans
+
+from .common import ensure_custom_trainers_installed, plan_and_preprocess, train
+
+PLANS = "nnUNetPlans_transformer"
+TRAINERS = ("nnUNetTrainer_UNETR", "nnUNetTrainer_SwinUNETR", "nnUNetTrainer_MedNeXt")
 
 
-def run(device=None, epochs=None):
-    # Dedicated plans file so injecting ``img_size`` never disturbs the baseline
-    # ``nnUNetPlans.json`` used by Experiments 1-5.
-    plan_and_preprocess(plans_identifier="nnUNetPlans_transformer")
-    if epochs:
-        set_num_epochs(epochs, plans_identifier="nnUNetPlans_transformer")
-
+def run(device=None, folds=None):
+    plan_and_preprocess(plans_identifier=PLANS)
+    patch_plans(plans_identifier=PLANS)  # img_size + disable deep supervision
     ensure_custom_trainers_installed()
-    patch_arch_init_kwargs(plans_identifier="nnUNetPlans_transformer")
 
-    for name in ("nnUNetTrainer_UNETR", "nnUNetTrainer_SwinUNETR", "nnUNetTrainer_MedNeXt"):
-        train(name, plans_identifier="nnUNetPlans_transformer", device=device)
+    for trainer in TRAINERS:
+        train(trainer, plans_identifier=PLANS, device=device, folds=folds)

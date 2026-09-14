@@ -1,8 +1,8 @@
-"""Segmentation metrics for final evaluation: Dice, HD95, clDice.
+"""Segmentation metrics for final evaluation: Dice, HD95, clDice, bbox IoU.
 
 nnU-Net reports Dice internally during training but does not ship a standalone
 HD95 / clDice command, so these are computed here against a ground-truth folder
-(see ``evaluate.py``).
+(see ``evaluate.py``). ``bbox_iou`` is used for the Exp 4 ROI-localization check.
 """
 
 import numpy as np
@@ -44,3 +44,22 @@ def cl_dice(pred, gt):
     if tprec + tsens == 0:
         return 0.0
     return 2.0 * tprec * tsens / (tprec + tsens)
+
+
+def bbox_iou(pred, gt):
+    """IoU of the tight 3D bounding boxes of two binary masks (ROI localization)."""
+    pz, py, px = np.nonzero(np.asarray(pred) > 0.5)
+    gz, gy, gx = np.nonzero(np.asarray(gt) > 0.5)
+    if len(pz) == 0 or len(gz) == 0:
+        return float("nan")
+    p = (pz.min(), py.min(), px.min(), pz.max(), py.max(), px.max())
+    g = (gz.min(), gy.min(), gx.min(), gz.max(), gy.max(), gx.max())
+
+    inter = [max(p[0], g[0]), max(p[1], g[1]), max(p[2], g[2]),
+             min(p[3], g[3]), min(p[4], g[4]), min(p[5], g[5])]
+    iv = (inter[3] - inter[0] + 1) * (inter[4] - inter[1] + 1) * (inter[5] - inter[2] + 1)
+    if iv <= 0:
+        return 0.0
+    pv = (p[3] - p[0] + 1) * (p[4] - p[1] + 1) * (p[5] - p[2] + 1)
+    gv = (g[3] - g[0] + 1) * (g[4] - g[1] + 1) * (g[5] - g[2] + 1)
+    return float(iv) / max(pv + gv - iv, 1)

@@ -1,28 +1,25 @@
-"""Exp 6 — UNETR (Hatamizadeh et al., WACV 2022), via the official MONAI model."""
+"""Exp 6 — UNETR (MONAI) trainer.
+
+Single-output network (no deep-supervision heads), so the loss is the plain
+official Dice+CE *without* the DeepSupervisionWrapper. Deep supervision is
+disabled for this experiment in the plans file (see ``patch_plans``), keeping
+the data loader's single target, the network and the loss consistent.
+"""
 
 import torch.nn as nn
 
+from nnunetv2.training.loss.compound_losses import DC_and_CE_loss
+from nnunetv2.training.loss.dice import MemoryEfficientSoftDiceLoss
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class nnUNetTrainer_UNETR(nnUNetTrainer):
     @staticmethod
-    def build_network_architecture(
-            architecture_class_name,
-            arch_init_kwargs,
-            arch_init_kwargs_req_import,
-            num_input_channels,
-            num_output_channels,
-            enable_deep_supervision) -> nn.Module:
+    def build_network_architecture(architecture_class_name, arch_init_kwargs,
+                                   arch_init_kwargs_req_import, num_input_channels,
+                                   num_output_channels, enable_deep_supervision) -> nn.Module:
         from monai.networks.nets import UNETR
-
-        # MONAI UNETR needs a fixed input size equal to the nnU-Net patch size.
-        # ``img_size`` is injected into the plans file by
-        # ``nnunet_utils.plans_patch.patch_arch_init_kwargs`` (see exp6_models.py).
         img_size = tuple(arch_init_kwargs.get("img_size", (96, 96, 96)))
-
-        # UNETR has no deep-supervision heads -> single logit output, which the
-        # official DeepSupervisionWrapper handles transparently.
         return UNETR(
             in_channels=num_input_channels,
             out_channels=num_output_channels,
@@ -37,3 +34,11 @@ class nnUNetTrainer_UNETR(nnUNetTrainer):
             res_block=True,
             dropout_rate=0.0,
         )
+
+    def _build_loss(self):
+        # No deep supervision: plain Dice+CE, no DeepSupervisionWrapper.
+        return DC_and_CE_loss(
+            {'batch_dice': self.configuration_manager.batch_dice, 'smooth': 1e-5, 'do_bg': False},
+            {}, weight_ce=1, weight_dice=1,
+            ignore_label=self.label_manager.ignore_label,
+            dice_class=MemoryEfficientSoftDiceLoss)

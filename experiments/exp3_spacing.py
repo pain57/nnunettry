@@ -1,21 +1,20 @@
-"""Exp 3 — target spacing: default vs a finer (isotropic) target spacing.
+"""Exp 3 — target spacing study for thin duct structures.
 
-Uses the official ``--overwrite_target_spacing`` flag to produce a second set of
-plans that resamples to the requested spacing, keeping the baseline plans intact.
+Planning with ``--overwrite_target_spacing`` produces a second set of plans +
+preprocessed data (finer spacing) alongside the default baseline plans. Run this
+with the spacing measured from your real data, e.g. ``spacing=(0.75, 0.75, 0.75)``.
 """
 
-from .common import plan_and_preprocess, set_num_epochs, train
+from .common import DEFAULT_PLANS, plan_and_preprocess, train
+
+FINE_PLANS = "nnUNetPlans_fine"
 
 
-def run(device=None, epochs=None, spacing=(1.0, 1.0, 1.0)):
-    # baseline plans at the automatically-determined spacing
-    plan_and_preprocess(plans_identifier="nnUNetPlans")
-    # separate plans that resample to the finer target spacing
-    plan_and_preprocess(plans_identifier="nnUNetPlans_1mm", target_spacing=spacing)
+def run(device=None, folds=None, spacing=(1.0, 1.0, 1.0)):
+    # baseline (default planner, data-driven spacing)
+    plan_and_preprocess()
+    # finer fixed spacing for the sub-mm ducts
+    plan_and_preprocess(plans_identifier=FINE_PLANS, target_spacing=spacing)
 
-    if epochs:
-        set_num_epochs(epochs, plans_identifier="nnUNetPlans")
-        set_num_epochs(epochs, plans_identifier="nnUNetPlans_1mm")
-
-    train("nnUNetTrainer", plans_identifier="nnUNetPlans", device=device)
-    train("nnUNetTrainer", plans_identifier="nnUNetPlans_1mm", device=device)
+    train("nnUNetTrainer", plans_identifier=DEFAULT_PLANS, device=device, folds=folds)
+    train("nnUNetTrainer", plans_identifier=FINE_PLANS, device=device, folds=folds)

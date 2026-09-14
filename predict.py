@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Run inference through the official nnU-Net v2 predictor.
 
-Normal:
-    python predict.py --input nnUNet_raw/Dataset150_PancreasCT/imagesTs \
+Normal (5-fold ensemble):
+    python predict.py --input nnUNet_raw/Dataset150_PancreasDuct/imagesTs \
         --output predictions --trainer nnUNetTrainer
 
-Coarse-to-fine (Exp 4):
-    python predict.py --input nnUNet_raw/Dataset150_PancreasCT/imagesTs \
-        --output predictions_c2f --coarse_to_fine --margin 20
+The coarse-to-fine mode is the *future* two-stage pipeline (deferred until real
+pancreatic-duct / bile-duct GT exists). For now Exp 4 only validates ROI
+localization — see ``evaluate.py --localization``.
 """
 
 import argparse
@@ -19,6 +19,8 @@ from nnunet_utils.config import (
 )
 
 setup_paths()
+
+ALL_FOLDS = (0, 1, 2, 3, 4)
 
 
 def _run(cmd):
@@ -36,10 +38,11 @@ def predict_normal(args):
     _run(["nnUNetv2_predict",
           "-i", args.input, "-o", args.output,
           "-d", str(DATASET_ID), "-c", args.config, "-tr", args.trainer,
-          "-p", args.plans, "-f", str(args.fold), "-chk", args.checkpoint])
+          "-p", args.plans, "-f"] + [str(f) for f in args.folds] + ["-chk", args.checkpoint])
 
 
 def predict_coarse_to_fine(args):
+    """Two-stage coarse-to-fine (future two-stage pipeline; see module docstring)."""
     import nibabel as nib
     import numpy as np
     from batchgenerators.utilities.file_and_folder_operations import (
@@ -54,18 +57,18 @@ def predict_coarse_to_fine(args):
     maybe_mkdir_p(coarse_tmp)
     maybe_mkdir_p(crop_tmp)
 
-    # 1) coarse stage (3d_lowres) — localize the pancreas
+    # 1) coarse stage (3d_lowres) — localize the ROI
     coarse = nnUNetPredictor(verbose=False, verbose_preprocessing=False, allow_tqdm=True)
     coarse.initialize_from_trained_model_folder(
         model_folder("nnUNetTrainer", args.coarse_config),
-        use_folds=(args.fold,), checkpoint_name=args.checkpoint)
+        use_folds=tuple(args.folds), checkpoint_name=args.checkpoint)
     coarse.predict_from_files(input_files, coarse_tmp, save_probabilities=False, overwrite=True)
 
-    # 2) fine stage (3d_fullres) — segment each ROI crop
+    # 2) fine stage (3d_fullres) — segment inside each ROI crop
     fine = nnUNetPredictor(verbose=False, verbose_preprocessing=False, allow_tqdm=True)
     fine.initialize_from_trained_model_folder(
         model_folder("nnUNetTrainer", args.config),
-        use_folds=(args.fold,), checkpoint_name=args.checkpoint)
+        use_folds=tuple(args.folds), checkpoint_name=args.checkpoint)
 
     for in_file in input_files:
         case_id = Path(in_file).name.replace("_0000.nii.gz", "")
@@ -116,10 +119,11 @@ def main():
     ap.add_argument("--trainer", default="nnUNetTrainer")
     ap.add_argument("--config", default="3d_fullres")
     ap.add_argument("--plans", default=DEFAULT_PLANS)
-    ap.add_argument("--fold", type=int, default=0)
+    ap.add_argument("--folds", type=int, nargs="+", default=list(ALL_FOLDS),
+                    help="folds to ensemble (default: all 5)")
     ap.add_argument("--checkpoint", default="checkpoint_final.pth")
     ap.add_argument("--coarse_to_fine", action="store_true",
-                    help="two-stage coarse-to-fine inference (Exp 4)")
+                    help="two-stage coarse-to-fine inference (future; deferred until real duct GT)")
     ap.add_argument("--coarse_config", default="3d_lowres",
                     help="configuration used for the coarse/localization stage")
     ap.add_argument("--margin", type=int, default=20, help="ROI margin in voxels")

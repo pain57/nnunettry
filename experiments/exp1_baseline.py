@@ -1,10 +1,11 @@
-"""Exp 1 — nnU-Net v2 baseline: default PlainConvUNet, 3d_fullres, Dice+CE."""
+"""Exp 1 — nnU-Net v2 3D fullres baseline (PlainConvUNet, Dice+CE, 1000 epochs).
 
-from .common import plan_and_preprocess, set_num_epochs, train
+Official planner + official trainer, no changes. Trains all 5 folds.
+"""
+
+from .common import plan_and_preprocess, train
 
 
-def run(device=None, epochs=None):
+def run(device=None, folds=None):
     plan_and_preprocess()
-    if epochs:
-        set_num_epochs(epochs)
-    train("nnUNetTrainer", device=device)
+    train("nnUNetTrainer", device=device, folds=folds)

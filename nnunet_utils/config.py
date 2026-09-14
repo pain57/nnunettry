@@ -2,16 +2,19 @@
 
 nnU-Net reads ``nnUNet_raw`` / ``nnUNet_preprocessed`` / ``nnUNet_results`` from
 environment variables **at import time**. :func:`setup_paths` must therefore be
-called before importing any ``nnunetv2`` module — the experiment scripts and
-entry points in this project all do this first.
+called before importing any ``nnunetv2`` module (the entry points do this first).
 """
 
 import os
 from pathlib import Path
 
 #: dataset identifier used by every experiment (nnU-Net convention Dataset###_Name)
-DATASET_NAME = "Dataset150_PancreasCT"
+DATASET_NAME = "Dataset150_PancreasDuct"
 DATASET_ID = 150
+
+#: segmentation targets are the thin duct structures, not the whole pancreas
+LABELS = {"background": 0, "pancreatic_duct": 1, "bile_duct": 2}
+NUM_CLASSES = len(LABELS)
 
 #: local base folders (kept inside the project so everything is self-contained)
 PROJECT_DIR = Path(__file__).resolve().parent.parent

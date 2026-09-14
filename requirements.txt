@@ -1,6 +1,8 @@
-# Core — official nnU-Net v2 (https://github.com/MIC-DKFZ/nnUNet)
+# Requires Python 3.11
+
+# Core — official nnU-Net v2 (https://github.com/MIC-DKFZ/nnUNet), pinned
 torch>=2.0
-nnunetv2>=2.2,<3.0
+nnunetv2==2.8.1
 batchgenerators>=0.25
 nibabel
 numpy

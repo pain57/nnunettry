@@ -1,8 +1,9 @@
 """Helpers to tweak the official plans file (nnUNetPlans*.json).
 
-These only edit fields that nnU-Net itself reads back (``num_epochs`` and the
-architecture init kwargs used by the custom backbones). They never reimplement
-planning or preprocessing — both are still done by ``nnUNetv2_plan_and_preprocess``.
+These only edit fields that nnU-Net itself reads back (architecture init kwargs
+and the deep-supervision flag). Planning and preprocessing are still done by
+``nnUNetv2_plan_and_preprocess``. Training length is left at the official
+default (1000 epochs) — it is no longer overridden via the plans file.
 """
 
 from batchgenerators.utilities.file_and_folder_operations import join, load_json, save_json
@@ -14,25 +15,14 @@ def _plans_path(dataset_name, plans_identifier):
     return join(PREPROCESSED_DIR, dataset_name, f"{plans_identifier}.json")
 
 
-def set_num_epochs(epochs, dataset_name=DATASET_NAME, configuration="3d_fullres",
-                   plans_identifier=DEFAULT_PLANS):
-    """Override the training length recorded in a plans file."""
-    plans_path = _plans_path(dataset_name, plans_identifier)
-    plans = load_json(plans_path)
-    plans["configurations"][configuration]["num_epochs"] = int(epochs)
-    save_json(plans, plans_path)
-    print(f"set num_epochs={epochs} for {configuration} in {plans_path}")
+def patch_plans(img_size=None, enable_deep_supervision=False, dataset_name=DATASET_NAME,
+                configuration="3d_fullres", plans_identifier=DEFAULT_PLANS):
+    """Prepare a plans file for the single-output backbones (Exp 6).
 
-
-def patch_arch_init_kwargs(img_size=None, dataset_name=DATASET_NAME,
-                           configuration="3d_fullres", plans_identifier=DEFAULT_PLANS):
-    """Inject the patch size (``img_size``) into a plans file.
-
-    The custom backbones (UNETR / SwinUNETR) need a fixed input size equal to the
-    nnU-Net patch size; their ``build_network_architecture`` reads it from
-    ``arch_init_kwargs``. nnU-Net passes the dict stored under one of the keys
-    below as ``arch_init_kwargs``, so populate every plausible key to stay
-    compatible across minor nnU-Net versions.
+    * injects ``img_size`` (== patch size) into the architecture init kwargs so
+      UNETR / SwinUNETR get the correct fixed input size;
+    * disables deep supervision, since those backbones have no DS heads (this
+      keeps the data loader's single target, the loss and the network consistent).
     """
     plans_path = _plans_path(dataset_name, plans_identifier)
     plans = load_json(plans_path)
@@ -41,8 +31,14 @@ def patch_arch_init_kwargs(img_size=None, dataset_name=DATASET_NAME,
         img_size = cfg["patch_size"]
     img_size = [int(s) for s in img_size]
 
+    # nnU-Net passes one of these dicts to build_network_architecture(...) as
+    # ``arch_init_kwargs``; populate every plausible key to stay compatible
+    # across minor nnU-Net versions.
     for key in ("network_arch_init_kwargs", "arch_init_kwargs"):
         cfg.setdefault(key, {})["img_size"] = img_size
     cfg.setdefault("architecture", {}).setdefault("arch_init_kwargs", {})["img_size"] = img_size
+
+    cfg["enable_deep_supervision"] = bool(enable_deep_supervision)
     save_json(plans, plans_path)
-    print(f"patched img_size={img_size} into {plans_path}")
+    print(f"patched {plans_path}: img_size={img_size}, "
+          f"enable_deep_supervision={enable_deep_supervision}")
