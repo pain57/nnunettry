@@ -48,7 +48,7 @@ python convert_amos_mri_pancreas.py \
     --test_labels_dir /path/to/amos22_mri/labelsVa
 
 # 1) 数据集完整性检查 + fingerprint + planning + preprocessing
-nnUNetv2_plan_and_preprocess -d 150 -c 3d_fullres -verify_dataset_integrity
+nnUNetv2_plan_and_preprocess -d 150 -c 3d_fullres --verify_dataset_integrity
 
 # 2) Exp 1 冒烟测试：只跑 fold 0，确认预处理/训练/验证/预测都正常
 python run_experiment.py --exp 1 --folds 0
@@ -134,7 +134,7 @@ UNETR / SwinUNETR / MedNeXt 没有深监督头。Exp 6 用独立 plans（`nnUNet
 ## 说明
 
 - 目标版本：**nnunetv2==2.8.1，Python 3.11**。
-- planner 旗标用 `-pl`；integrity check 用 `-verify_dataset_integrity`（单横线）。
+- planner 旗标用 `-pl`；integrity check 用 `--verify_dataset_integrity`（双横线）。
   其余旗标（`-overwrite_plans_name`、`-tr`、`-p` 等）按 nnU-Net v2 惯例。
 - 开始前请先把 AMOS22 MRI 的 `imagesTr/labelsTr`（及可选的 `imagesVa/labelsVa`）路径
   传给 `convert_amos_mri_pancreas.py`。

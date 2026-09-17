@@ -32,7 +32,7 @@ def plan_and_preprocess(dataset_id=DATASET_ID, configurations=("3d_fullres",),
     """
     cmd = ["nnUNetv2_plan_and_preprocess", "-d", str(dataset_id),
            "-c"] + list(configurations) + [
-           "-verify_dataset_integrity",
+           "--verify_dataset_integrity",
            "-overwrite_plans_name", plans_identifier]
     if planner is not None:
         cmd += ["-pl", planner]

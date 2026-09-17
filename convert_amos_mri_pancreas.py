@@ -138,7 +138,7 @@ def main():
     _write_dataset_json(out_dir, n_train)
 
     print(f"\nDone: {n_train} train + {n_test} test cases in {out_dir.resolve()}")
-    print("Next:  nnUNetv2_plan_and_preprocess -d 150 -c 3d_fullres -verify_dataset_integrity")
+    print("Next:  nnUNetv2_plan_and_preprocess -d 150 -c 3d_fullres --verify_dataset_integrity")
 
 
 if __name__ == "__main__":
