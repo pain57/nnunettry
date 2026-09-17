@@ -8,20 +8,13 @@ called before importing any ``nnunetv2`` module (the entry points do this first)
 import os
 from pathlib import Path
 
-#: main segmentation dataset — thin duct structures (not the whole pancreas)
-DATASET_NAME = "Dataset150_PancreasDuct"
+#: main segmentation dataset — AMOS22 MRI, single-organ pancreas segmentation
+DATASET_NAME = "Dataset150_AMOSMRI_Pancreas"
 DATASET_ID = 150
 
-#: second dataset used only by Exp 4's coarse stage: pancreas + hepatobiliary ROI
-ROI_DATASET_NAME = "Dataset151_PancreasROI"
-ROI_DATASET_ID = 151
-
-#: duct segmentation targets (pancreatic_duct / bile_duct as separate classes)
-LABELS = {"background": 0, "pancreatic_duct": 1, "bile_duct": 2}
+#: binary pancreas segmentation (AMOS22 organ label 10 -> 1)
+LABELS = {"background": 0, "pancreas": 1}
 NUM_CLASSES = len(LABELS)
-
-#: ROI localization target for the Exp 4 coarse stage (single foreground class)
-ROI_LABELS = {"background": 0, "roi": 1}
 
 #: local base folders (kept inside the project so everything is self-contained)
 PROJECT_DIR = Path(__file__).resolve().parent.parent

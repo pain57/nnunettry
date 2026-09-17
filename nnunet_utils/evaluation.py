@@ -1,7 +1,7 @@
 """Folder-level evaluation shared by ``evaluate.py`` and ``compare_experiments.py``.
 
-Metrics are computed per foreground class (pancreatic duct / bile duct); HD95 and
-ASSD use the ground-truth voxel spacing so they are reported in millimetres.
+Metrics are computed per foreground class (pancreas); HD95 and ASSD use the
+ground-truth voxel spacing so they are reported in millimetres.
 """
 
 from pathlib import Path
@@ -9,10 +9,10 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
-from .metrics import assd, bbox_iou, cl_dice, dice_score, hausdorff_distance_95, recall
+from .metrics import assd, bbox_iou, dice_score, hausdorff_distance_95, precision, recall
 
-FOREGROUND = {1: "pancreatic_duct", 2: "bile_duct"}
-METRIC_NAMES = ("Dice", "Recall", "HD95(mm)", "ASSD(mm)", "clDice")
+FOREGROUND = {1: "pancreas"}
+METRIC_NAMES = ("Dice", "Recall", "Precision", "HD95(mm)", "ASSD(mm)")
 
 
 def _case_files(d, suffix=".nii.gz"):
@@ -41,7 +41,7 @@ def _case_id(name):
 def evaluate_folder(pred_dir, gt_dir):
     """Evaluate one prediction folder against a GT folder.
 
-    Returns ``{"cases": {case_id: {class: [Dice, Recall, HD95, ASSD, clDice]}},
+    Returns ``{"cases": {case_id: {class: [Dice, Recall, Precision, HD95, ASSD]}},
     "means": {class: [mean over cases]}}``.
     """
     cases = {}
@@ -59,20 +59,20 @@ def evaluate_folder(pred_dir, gt_dir):
         row = {}
         for c in FOREGROUND:
             p, g = pred == c, gt_data == c
-            row[c] = [dice_score(p, g), recall(p, g),
+            row[c] = [dice_score(p, g), recall(p, g), precision(p, g),
                       hausdorff_distance_95(p, g, spacing=spacing),
-                      assd(p, g, spacing=spacing), cl_dice(p, g)]
+                      assd(p, g, spacing=spacing)]
         cases[case_id] = row
 
     means = {}
     for c in FOREGROUND:
-        arr = np.array([cases[cid][c] for cid in cases], dtype=float) if cases else np.empty((0, 5))
+        arr = np.array([cases[cid][c] for cid in cases], dtype=float) if cases else np.empty((0, len(METRIC_NAMES)))
         means[c] = np.nanmean(arr, axis=0) if arr.size else np.full(len(METRIC_NAMES), np.nan)
     return {"cases": cases, "means": means}
 
 
 def evaluate_localization(pred_dir, gt_dir):
-    """bbox IoU per case (coarse ROI localization check)."""
+    """bbox IoU per case (quick localization check, not a segmentation metric)."""
     cases = {}
     for pf in _case_files(pred_dir):
         case_id = _case_id(pf.name)

@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Evaluate predictions against ground truth, per foreground class.
+"""Evaluate pancreas predictions against ground truth.
 
-Metrics: Dice, Recall, HD95 (mm), ASSD (mm), clDice. Surface distances use the
-ground-truth voxel spacing so HD95 / ASSD are reported in millimetres.
+Metrics: Dice, Recall, Precision, HD95 (mm), ASSD (mm). Surface distances use
+the ground-truth voxel spacing so HD95 / ASSD are reported in millimetres.
 
     python evaluate.py --pred_dir predictions \
-        --gt_dir nnUNet_raw/Dataset150_PancreasDuct/labelsTs
-
-ROI localization check (coarse stage only, bbox IoU):
-    python evaluate.py --pred_dir <roi_preds> --gt_dir ... --localization
+        --gt_dir nnUNet_raw/Dataset150_AMOSMRI_Pancreas/labelsTs
 """
 
 import argparse
@@ -23,7 +20,7 @@ def main():
     ap.add_argument("--pred_dir", required=True)
     ap.add_argument("--gt_dir", required=True)
     ap.add_argument("--localization", action="store_true",
-                    help="report bbox IoU (coarse ROI localization) instead of segmentation metrics")
+                    help="report bbox IoU (quick localization check) instead of segmentation metrics")
     args = ap.parse_args()
 
     if args.localization:

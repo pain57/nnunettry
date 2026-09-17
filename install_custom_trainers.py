@@ -38,8 +38,8 @@ def main():
     for dst in copied:
         print(f"installed {dst.name} -> {dst}")
     print("\nCustom trainers are now resolvable by name, e.g.:")
-    print("  nnUNetv2_train 150 3d_fullres 0 -tr nnUNetTrainer_DiceCEclDice")
     print("  nnUNetv2_train 150 3d_fullres 0 -tr nnUNetTrainer_UNETR")
+    print("  nnUNetv2_train 150 3d_fullres 0 -tr nnUNetTrainer_SwinUNETR")
 
 
 if __name__ == "__main__":

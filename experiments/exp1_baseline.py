@@ -1,6 +1,7 @@
-"""Exp 1 — nnU-Net v2 3D fullres baseline (PlainConvUNet, Dice+CE, 1000 epochs).
+"""Exp 1 — nnU-Net v2 3D fullres baseline for AMOS22 MRI pancreas segmentation.
 
-Official planner + official trainer, no changes. Trains all 5 folds.
+Official planner + official ``nnUNetTrainer`` (PlainConvUNet, Dice+CE, 1000
+epochs), no changes. Trains all 5 folds.
 """
 
 from .common import plan_and_preprocess, train

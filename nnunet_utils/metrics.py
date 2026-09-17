@@ -1,14 +1,17 @@
-"""Segmentation metrics for final evaluation: Dice, Recall, HD95, ASSD, clDice, bbox IoU.
+"""Segmentation metrics for final evaluation: Dice, Recall, Precision, HD95, ASSD.
 
 nnU-Net reports Dice internally during training but does not ship a standalone
-Recall / HD95 / ASSD / clDice command, so these are computed here against a
+Recall / Precision / HD95 / ASSD command, so these are computed here against a
 ground-truth folder (see ``evaluate.py``). Surface distances (HD95 / ASSD) accept
 the voxel ``spacing`` so they are reported in millimetres, not voxels.
+
+``cl_dice`` and ``bbox_iou`` are kept for the future pancreatic-duct / bile-duct
+work (thin tubes) but are not part of the current pancreas evaluation.
 """
 
 import numpy as np
 from scipy.ndimage import binary_erosion, distance_transform_edt
-from skimage.morphology import skeletonize_3d
+from skimage.morphology import skeletonize
 
 
 def dice_score(pred, gt):
@@ -29,6 +32,16 @@ def recall(pred, gt):
     if gt_sum == 0:
         return float("nan")
     return float(np.logical_and(pred, gt).sum()) / float(gt_sum)
+
+
+def precision(pred, gt):
+    """Precision = |pred ∩ gt| / |pred|."""
+    pred = np.asarray(pred) > 0.5
+    gt = np.asarray(gt) > 0.5
+    pred_sum = pred.sum()
+    if pred_sum == 0:
+        return float("nan")
+    return float(np.logical_and(pred, gt).sum()) / float(pred_sum)
 
 
 def hausdorff_distance_95(pred, gt, spacing=(1, 1, 1)):
@@ -60,12 +73,13 @@ def assd(pred, gt, spacing=(1, 1, 1)):
 
 
 def cl_dice(pred, gt):
+    """Topology-sensitive Dice (centerline Dice) — kept for the future duct task."""
     pred = np.asarray(pred) > 0.5
     gt = np.asarray(gt) > 0.5
     if pred.sum() == 0 or gt.sum() == 0:
         return 0.0
-    skel_pred = skeletonize_3d(pred)
-    skel_gt = skeletonize_3d(gt)
+    skel_pred = skeletonize(pred)
+    skel_gt = skeletonize(gt)
     tprec = skel_pred[gt].sum() / max(skel_pred.sum(), 1e-12)
     tsens = skel_gt[pred].sum() / max(skel_gt.sum(), 1e-12)
     if tprec + tsens == 0:

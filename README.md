@@ -1,32 +1,31 @@
-# nnU-Net v2 胰管/胆管分割 — 六步技术路线实验框架
+# nnU-Net v2 胰腺分割（AMOS22 MRI）
 
-基于**官方 nnU-Net v2 包**（`nnunetv2==2.8.1`，Python 3.11）的胰管 / 胆管 CT 分割实验框架。
-训练 / 规划 / 预处理 / 推理全部调用官方 `nnUNetv2_*` 入口，只在官方扩展点做少量自定义
-（clDice 损失、UNETR / SwinUNETR / MedNeXt 网络），**不再自建 nnU-Net 克隆**。
+基于**官方 nnU-Net v2 包**（`nnunetv2==2.8.1`，Python 3.11）的 **AMOS22 MRI 胰腺分割**
+实验框架。训练 / 规划 / 预处理 / 推理全部调用官方 `nnUNetv2_*` 入口，只在官方扩展点做少量
+自定义（UNETR / SwinUNETR / MedNeXt 网络），**不自建 nnU-Net 克隆**。
 
-> 分割目标是**胰管（pancreatic duct）和胆管（bile duct）**两条细管道，不是整个胰腺；
-> 两个 duct 类别是独立标签，**不合并进 pancreas**。旧的 `train.py` 与 `nnunet/`（自建实现）
-> 已删除；`runs/`、`predictions/` 是旧自建实现的产物，已废弃，可删除。
+> 当前任务：**单器官胰腺分割**（`background=0, pancreas=1`，由 AMOS22 器官标签 `10` 映射而来）。
+> 未来获得胰管 / 胆管数据集后，再切换回胰胆管分割（Exp 4 两阶段、Exp 5 clDice 已暂存待用）。
 
 ## 技术路线 → 实验映射
 
-| # | 实验 | 做法（官方机制） | 入口 |
+| # | 实验 | 做法（官方机制） | 状态 |
 |---|------|------------------|------|
-| 1 | **基线** nnU-Net v2 3D fullres PlainConvUNet | 默认 `nnUNetTrainer`（Dice+CE，官方 1000 epochs） | [exp1_baseline.py](experiments/exp1_baseline.py) |
-| 2 | **骨干对比** ResEnc M/L | planner `nnUNetPlannerResEncM/L` → `nnUNetResEncUNetM/LPlans` → 默认 `nnUNetTrainer` | [exp2_backbone.py](experiments/exp2_backbone.py) |
-| 3 | **目标间距** 研究细管道 | `--overwrite_target_spacing` 生成第二套 plans | [exp3_spacing.py](experiments/exp3_spacing.py) |
-| 4 | **两阶段** pancreas/肝胆 ROI → duct | 粗定位 ROI（Dataset151, 3d_lowres）→ 精分割 duct（Dataset150, 3d_fullres） | [exp4_roi.py](experiments/exp4_roi.py) |
-| 5 | **连续性** Dice+CE vs +clDice | 自定义 `nnUNetTrainer_DiceCEclDice`（DS 兼容、双类别 clDice） | [exp5_cldice.py](experiments/exp5_cldice.py) |
-| 6 | **其他模型** UNETR / SwinUNETR / MedNeXt | 自定义 trainer（关闭深监督、读 `configuration_manager.patch_size`） | [exp6_models.py](experiments/exp6_models.py) |
+| 1 | **基线** PlainConvUNet + 3d_fullres | 默认 `nnUNetTrainer`（Dice+CE，官方 1000 epochs） | ✅ 主基线 |
+| 2 | **骨干对比** ResEnc M/L | planner `nnUNetPlannerResEncM/L` → `nnUNetResEncUNetM/LPlans` → `nnUNetTrainer` | ✅ |
+| 3 | **间距研究** | 先看 nnU-Net 自动 spacing，再决定是否固定 | ✅ 后置 |
+| 4 | **两阶段** ROI → duct | 需要 duct/ROI GT | ⏸ 暂停 |
+| 5 | **clDice** 连续性损失 | 需要细管道 GT | ⏸ 暂停 |
+| 6 | **其他模型** UNETR / SwinUNETR / MedNeXt | 自定义 trainer（关深监督 + 2.8.1 接口） | ✅ 后置 |
 
-## 数据集：两个 nnU-Net dataset
+## 数据集：`Dataset150_AMOSMRI_Pancreas`
 
-| 数据集 | 标签 | 用途 |
-|--------|------|------|
-| `Dataset150_PancreasDuct` | `background=0, pancreatic_duct=1, bile_duct=2` | 主分割任务（Exp 1/2/3/5/6，及 Exp 4 的细阶段） |
-| `Dataset151_PancreasROI` | `background=0, roi=1`（pancreas + 肝胆区） | Exp 4 的粗定位阶段 |
-
-两者共享同一批 CT 图像（`generate_synthetic_data.py` 一次生成两套标签）。
+| 项 | 值 |
+|----|----|
+| 模态 | **MRI**（不是 CT） |
+| 标签 | `background=0, pancreas=1` |
+| 来源 | AMOS22 MRI（器官标签 `10` → `1`） |
+| 目录 | `imagesTr / labelsTr / imagesTs / labelsTs + dataset.json` |
 
 ## 安装
 
@@ -38,48 +37,57 @@ pip install -r requirements.txt
 pip install git+https://github.com/MIC-DKFZ/MedNeXt.git
 ```
 
-## 快速开始
+## 快速开始（正式训练前的顺序）
 
 ```bash
-# 1) 生成合成数据（duct 数据集 + ROI 数据集，直接写入 nnU-Net raw 格式）
-python generate_synthetic_data.py --num_train 20 --num_test 4
+# 0) 转换 AMOS22 MRI -> nnU-Net raw（胰腺标签 10 -> 1）
+python convert_amos_mri_pancreas.py \
+    --images_dir /path/to/amos22_mri/imagesTr \
+    --labels_dir /path/to/amos22_mri/labelsTr \
+    --test_images_dir /path/to/amos22_mri/imagesVa \
+    --test_labels_dir /path/to/amos22_mri/labelsVa
 
-# 2) 运行某个实验（依次完成 plan + preprocess + 5-fold 训练）
+# 1) 数据集完整性检查 + fingerprint + planning + preprocessing
+nnUNetv2_plan_and_preprocess -d 150 -c 3d_fullres -verify_dataset_integrity
+
+# 2) Exp 1 冒烟测试：只跑 fold 0，确认预处理/训练/验证/预测都正常
+python run_experiment.py --exp 1 --folds 0
+
+# 3) fold 0 正常后，跑 Exp 1 完整 5-fold
 python run_experiment.py --exp 1
-python run_experiment.py --exp 6 --device cpu          # 或 --folds 0 1 只跑部分 fold
 
-# 3) 推理（默认 5-fold 集成）
-python predict.py --input nnUNet_raw/Dataset150_PancreasDuct/imagesTs --output predictions
-python predict.py --input nnUNet_raw/Dataset150_PancreasDuct/imagesTs \
-    --output predictions_c2f --coarse_to_fine          # Exp 4 两阶段
+# 4) Exp 1 完成后跑 Exp 2（ResEnc M/L）
+python run_experiment.py --exp 2
 
-# 4) 评估（逐类 Dice/Recall/HD95(mm)/ASSD(mm)/clDice）
-python evaluate.py --pred_dir predictions --gt_dir nnUNet_raw/Dataset150_PancreasDuct/labelsTs
+# 5) 推理（默认 5-fold 集成）
+python predict.py --input nnUNet_raw/Dataset150_AMOSMRI_Pancreas/imagesTs --output predictions
 
-# 5) Exp 1–6 正式对比（每个实验一个预测目录，输出一张对比表）
+# 6) 评估（Dice/Recall/Precision/HD95(mm)/ASSD(mm)）
+python evaluate.py --pred_dir predictions --gt_dir nnUNet_raw/Dataset150_AMOSMRI_Pancreas/labelsTs
+
+# 7) 实验间正式对比
 python compare_experiments.py \
-    --gt_dir nnUNet_raw/Dataset150_PancreasDuct/labelsTs \
-    --pred_dirs exp1=predictions/exp1 exp2_resencM=predictions/exp2_m \
-        exp2_resencL=predictions/exp2_l exp4=predictions/exp4 \
-        exp5=predictions/exp5 exp6_unetr=predictions/exp6_unetr \
-        exp6_swinunetr=predictions/exp6_swinunetr exp6_mednext=predictions/exp6_mednext
+    --gt_dir nnUNet_raw/Dataset150_AMOSMRI_Pancreas/labelsTs \
+    --pred_dirs exp1=predictions/exp1 exp2_m=predictions/exp2_m exp2_l=predictions/exp2_l
 ```
+
+最后再考虑 Exp 3（间距）与 Exp 6（transformer 模型）。
 
 ## 目录结构
 
 ```
 胰腺分割/
 ├── nnunet_utils/            # 官方包的薄封装（不改 nnU-Net 内部）
-│   ├── config.py            # nnUNet_raw/preprocessed/results 路径 + 两个数据集/标签常量
-│   ├── plans_patch.py       # 关闭深监督（官方读回字段）
-│   ├── metrics.py           # Dice / Recall / HD95 / ASSD / clDice / bbox IoU（评估用）
+│   ├── config.py            # nnUNet_raw/preprocessed/results 路径 + 数据集/标签常量
+│   ├── plans_patch.py       # 关闭深监督（官方读回字段，Exp 6 用）
+│   ├── metrics.py           # Dice / Recall / Precision / HD95 / ASSD / clDice / bbox IoU
 │   └── evaluation.py        # 目录级评估（evaluate.py / compare_experiments.py 共用）
-├── custom_trainers/         # 官方扩展点：自定义 nnUNetTrainer 子类
-│   ├── nnUNetTrainer_DiceCEclDice.py
+├── custom_trainers/         # 官方扩展点：自定义 nnUNetTrainer 子类（Exp 6 用）
 │   ├── nnUNetTrainer_UNETR.py / nnUNetTrainer_SwinUNETR.py / nnUNetTrainer_MedNeXt.py
+│   └── nnUNetTrainer_DiceCEclDice.py   # Exp 5（clDice），暂存
 ├── experiments/             # 每个实验的编排脚本（调用官方 CLI）
 ├── install_custom_trainers.py
-├── generate_synthetic_data.py
+├── convert_amos_mri_pancreas.py
 ├── predict.py / evaluate.py / compare_experiments.py / run_experiment.py
 └── requirements.txt
 ```
@@ -91,90 +99,51 @@ python compare_experiments.py \
 `nnUNetv2_predict`（或 `nnUNetPredictor`）。`experiments/common.py` 只负责拼命令，
 环境变量 `nnUNet_raw/preprocessed/results` 指向项目内本地目录（见 `nnunet_utils/config.py`）。
 
-### 标签：胰管 / 胆管（双类，不合并）
-`Dataset150` 的 `dataset.json` 与 `config.py` 的标签为
-`{"background": 0, "pancreatic_duct": 1, "bile_duct": 2}`。合成数据里胰腺、肝、肾、脾、脊柱
-作为**未标注**的背景器官保留在 CT 中，只有两条细管道被标注（duct **不**并入 pancreas）。
+### 标签：胰腺（二分类）
+AMOS22 把胰腺标为器官标签 `10`；`convert_amos_mri_pancreas.py` 将 `10` 映射为 `1`，
+其余（肝、肾、脾、胃等）全部归 `0`。`dataset.json` 模态写成 **MRI**。
 
 ### 训练长度：统一官方 1000 epochs
-已删除「改 plans.json 的 `num_epochs`」的做法。所有正式实验统一使用官方默认 1000 epochs；
-`run_experiment.py` 不再提供 `--epochs`。
+所有正式实验统一使用官方默认 1000 epochs；`run_experiment.py` 不提供 `--epochs`。
 
 ### 5-fold 交叉验证
-nnU-Net v2 会自动从训练集生成标准 5-fold split。所有实验默认训练 fold 0–4，
-推理默认 5-fold 集成；`run_experiment.py --folds 0 1` 可只跑部分 fold。
-最后用 `evaluate.py` 对 Exp 1–6 的预测逐类比较 Dice/Recall/HD95/ASSD/clDice。
+nnU-Net v2 会自动从训练集生成标准 5-fold split。`--folds 0` 只跑 fold 0（冒烟测试），
+默认跑全部 5 fold；推理默认 5-fold 集成。
 
 ### ResEnc 骨干（Exp 2）：用 planner，不是 trainer
-nnU-Net v2 里 ResEnc 架构由 **planner** 决定：`nnUNetPlannerResEncM` / `nnUNetPlannerResEncL`
-规划时把残差编码器写进 plans 文件（名为 `nnUNetResEncUNetMPlans` / `nnUNetResEncUNetLPlans`），
-再用**标准 `nnUNetTrainer`** 训练。没有自定义 trainer。
+ResEnc 架构由 **planner** 决定：`nnUNetPlannerResEncM` / `nnUNetPlannerResEncL`
+规划时把残差编码器写进 plans（名为 `nnUNetResEncUNetMPlans` / `nnUNetResEncUNetLPlans`），
+再用**标准 `nnUNetTrainer`** 训练。planner 的 CLI 旗标是 **`-pl`**（不是 `-planner`）。
 
-### 目标间距（Exp 3，真实数据重新规划）
-细管道需要较细的 spacing。合成数据默认各向同性 `(1.0, 1.0, 1.0)` mm；
-**真实数据请用实际体素间距重新规划**（nnU-Net 会从真实数据自动估计 spacing）。
-Exp 3 用 `--overwrite_target_spacing` 生成第二套 plans 与基线对比：
-
-```bash
-# 在 experiments/exp3_spacing.py 里把 spacing 改成真实数据测得的值
-nnUNetv2_plan_and_preprocess -d 150 -c 3d_fullres --verify_dataset_integrity \
-    -overwrite_target_spacing 0.75 0.75 0.75 -overwrite_plans_name nnUNetPlans_fine
-```
-
-### 自定义 trainer 的安装（Exp 5/6）
-`nnUNetv2_train` / `nnUNetv2_predict` 按名字在 **已安装的 `nnunetv2` 包内**查找 trainer，
-因此自定义 trainer 需拷贝进该包一次（官方文档做法）：
-
-```bash
-python install_custom_trainers.py
-```
-
-Exp 5/6 脚本会在训练前自动执行这一步（幂等）。
-
-### clDice 损失（Exp 5）：3D pooling + 深监督 target + 双类别
-`nnUNetTrainer_DiceCEclDice` 包装官方的 `_build_loss`（已含深监督加权），再在**全分辨率头**上
-加软骨架化 clDice。要点：
-* 软腐蚀/膨胀用 `F.max_pool3d`（3D pooling），kernel 为 3 元组 `(3,1,1)`/`(1,3,1)`/`(1,1,3)`，
-  只作用在三个空间维；
-* 深监督开启时 nnU-Net 把输出和 target 都传成 list，这里取 `net_output[0]` / `target[0]`
-  的全分辨率元素计算 clDice；
-* 对每个前景类别（pancreatic_duct、bile_duct）各算一个 clDice 再相加。
+### 间距（Exp 3）：先看自动 spacing
+默认**不固定** `1×1×1 mm`。nnU-Net 会从 AMOS MRI 的真实体素间距自动决定 target spacing，
+Exp 3 从生成的 plans 读回并打印该值，之后如有需要再加 `-overwrite_target_spacing`。
 
 ### 单输出 backbone（Exp 6）：关闭深监督 + 2.8.1 新接口
-UNETR / SwinUNETR / MedNeXt 没有深监督头。Exp 6 用独立 plans
-（`nnUNetPlans_transformer`）并做两件事：
+UNETR / SwinUNETR / MedNeXt 没有深监督头。Exp 6 用独立 plans（`nnUNetPlans_transformer`）：
 1. `disable_deep_supervision` 把 plans 里的 `enable_deep_supervision` 置 `False`，同时
-   trainer 的 `_build_loss` 返回**不带** `DeepSupervisionWrapper` 的纯 Dice+CE，保证数据加载的
-   单一 target、网络、损失三者一致；
+   trainer 的 `_build_loss` 返回不带 `DeepSupervisionWrapper` 的纯 Dice+CE；
 2. `build_network_architecture` 为**实例方法**（2.8.1 接口），直接从
-   `self.configuration_manager.patch_size` 读取 `img_size`（不再注入 arch_init_kwargs）。
-
-### 两阶段 ROI → duct（Exp 4）
-粗阶段在 `Dataset151` 上训练 `3d_lowres`，定位 pancreas + 肝胆 ROI；细阶段在 `Dataset150`
-上训练 `3d_fullres`，在 ROI 内分割 duct。`predict.py --coarse_to_fine` 串起两阶段：
-粗预测 ROI → 裁剪（含 margin）→ 细分割 duct → 贴回全图。
+   `self.configuration_manager.patch_size` 读取 `img_size`。
 
 ### 评估指标（evaluate.py / compare_experiments.py）
-`nnunet_utils/evaluation.py` 提供目录级评估，逐类计算 Dice / Recall / HD95 / ASSD / clDice；
-HD95 与 ASSD 用 GT 的体素 spacing 换算成**毫米**。
-
-* `evaluate.py` 评估**单个**预测目录，逐 case、逐类打印，并给出逐类均值；`--localization`
-  用 bbox IoU 快速检查粗定位阶段。
-* `compare_experiments.py` 做 **Exp 1–6 正式对比**：传入 `name=path` 的 `--pred_dirs`，
-  输出一张「实验 ×（逐类指标 + 双类均值）」对比表。
+逐类计算 **Dice / Recall / Precision / HD95 / ASSD**；HD95 与 ASSD 用 GT 的体素 spacing
+换算成**毫米**。`cl_dice`（已改用新版 `skimage.morphology.skeletonize`）与 `bbox_iou`
+保留在 `metrics.py`，供未来胰胆管任务使用，不参与当前胰腺评估。
 
 ## 说明
 
-- 目标版本：**nnunetv2==2.8.1，Python 3.11**（`--overwrite_target_spacing` /
-  `-planner` / 实例方法 `build_network_architecture` 均可用）。
-- 各 CLI 旗标按 nnU-Net v2 惯例写成单横线（`-overwrite_plans_name`、`-planner`、`-tr`、`-p` 等）；
-  个别版本若不同，先 `nnUNetv2_plan_and_preprocess -h` 核对。
+- 目标版本：**nnunetv2==2.8.1，Python 3.11**。
+- planner 旗标用 `-pl`；integrity check 用 `-verify_dataset_integrity`（单横线）。
+  其余旗标（`-overwrite_plans_name`、`-tr`、`-p` 等）按 nnU-Net v2 惯例。
+- 开始前请先把 AMOS22 MRI 的 `imagesTr/labelsTr`（及可选的 `imagesVa/labelsVa`）路径
+  传给 `convert_amos_mri_pancreas.py`。
 - UNETR/SwinUNETR 对 patch size 与显存较敏感；显存不足时在对应 trainer 里调小
   `hidden_size` / `feature_size` / `depths`，或减小 patch size。
 
 ## 参考
 
 - Isensee et al., "nnU-Net: a self-configuring method…" *Nature Methods* (2021)
-- Shit et al., "clDice — a novel topology-preserving loss…" *CVPR* (2021)
+- Ji et al., "AMOS: A Large-Scale Abdominal Multi-Organ Benchmark…" *arXiv* (2022)
 - Hatamizadeh et al., "UNETR…" *WACV* (2022); "Swin UNETR…" *MICCAI BrainLes* (2022)
 - Roy et al., "MedNeXt…" *MICCAI* (2023)
